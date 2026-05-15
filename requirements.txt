@@ -1,10 +1,19 @@
-fastapi
-uvicorn
-requests
-pandas
-schedule
-pdfplumber 
-pytesseract 
-pillow 
-pymupdf
-opencv-python
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+requests==2.32.3
+httpx==0.28.1
+python-dotenv==1.0.1
+pydantic==2.10.4
+
+pymupdf==1.25.1
+pdfplumber==0.11.5
+Pillow==11.1.0
+pytesseract==0.3.13
+opencv-python==4.10.0.84
+numpy==1.26.4
+
+groq>=0.15,<1
+
+# optional later if you switch back to paid cloud LLMs
+# openai>=1.59,<2
+# google-genai>=0.6,<1
