@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual Environment
+.venv/
+venv/
+
+# Database
+*.db
+*.sqlite3
+
+# State files
+state/
+
+# OCR outputs
+unstructured_ingestion/extracted_text/
+unstructured_ingestion/extracted_json/
+
+# Temp files
+*.log
+temp/
+
+# VS Code
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db

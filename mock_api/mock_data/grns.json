@@ -1,0 +1,291 @@
+[
+  {
+    "document_type": "grn",
+    "gr_number": "GR90001",
+    "po_number": "PO450001",
+    "vendor_name": "Dell India Pvt Ltd",
+    "gr_date": "2026-05-14",
+    "currency": "INR",
+    "document_subtotal": 290000,
+    "document_total": 290000,
+    "gr_status": "Received",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "Dell Latitude Laptop",
+        "qty": 5,
+        "unit_price": 50000,
+        "line_amount": 250000
+      },
+      {
+        "line_no": 2,
+        "description": "Dell Docking Station",
+        "qty": 5,
+        "unit_price": 8000,
+        "line_amount": 40000
+      }
+    ],
+    "last_modified": "2026-05-14T10:10:00"
+  },
+
+  {
+    "document_type": "grn",
+    "gr_number": "GR90002",
+    "po_number": "PO450002",
+    "vendor_name": "Infosys Ltd",
+    "gr_date": "2026-05-14",
+    "currency": "INR",
+    "document_subtotal": 118000,
+    "document_total": 118000,
+    "gr_status": "Received",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "Cloud Migration Service",
+        "qty": 1,
+        "unit_price": 100000,
+        "line_amount": 100000
+      },
+      {
+        "line_no": 2,
+        "description": "Support Retainer",
+        "qty": 1,
+        "unit_price": 18000,
+        "line_amount": 18000
+      }
+    ],
+    "last_modified": "2026-05-14T10:12:00"
+  },
+
+  {
+    "document_type": "grn",
+    "gr_number": "GR90003",
+    "po_number": "PO450003",
+    "vendor_name": "Lenovo India Pvt Ltd",
+    "gr_date": "2026-05-14",
+    "currency": "INR",
+    "document_subtotal": 336000,
+    "document_total": 336000,
+    "gr_status": "Partial",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "ThinkPad Laptop",
+        "qty": 6,
+        "unit_price": 55000,
+        "line_amount": 330000
+      },
+      {
+        "line_no": 2,
+        "description": "Wireless Mouse",
+        "qty": 6,
+        "unit_price": 1000,
+        "line_amount": 6000
+      }
+    ],
+    "last_modified": "2026-05-14T10:15:00"
+  },
+
+  {
+    "document_type": "grn",
+    "gr_number": "GR90004",
+    "po_number": "PO450004",
+    "vendor_name": "Apple India Pvt Ltd",
+    "gr_date": "2026-05-14",
+    "currency": "INR",
+    "document_subtotal": 540000,
+    "document_total": 540000,
+    "gr_status": "Received",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "MacBook Pro 16\"",
+        "qty": 4,
+        "unit_price": 120000,
+        "line_amount": 480000
+      },
+      {
+        "line_no": 2,
+        "description": "AppleCare+",
+        "qty": 4,
+        "unit_price": 15000,
+        "line_amount": 60000
+      }
+    ],
+    "last_modified": "2026-05-14T10:18:00"
+  },
+
+  {
+    "document_type": "grn",
+    "gr_number": "GR90005",
+    "po_number": "PO450005",
+    "vendor_name": "Samsung India",
+    "gr_date": "2026-05-14",
+    "currency": "INR",
+    "document_subtotal": 280000,
+    "document_total": 280000,
+    "gr_status": "Partial",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "27 inch Monitor",
+        "qty": 4,
+        "unit_price": 65000,
+        "line_amount": 260000
+      },
+      {
+        "line_no": 2,
+        "description": "Extended Warranty",
+        "qty": 4,
+        "unit_price": 5000,
+        "line_amount": 20000
+      }
+    ],
+    "last_modified": "2026-05-14T10:20:00"
+  },
+
+  {
+    "document_type": "grn",
+    "gr_number": "GR90006",
+    "po_number": "PO450006",
+    "vendor_name": "HP India Pvt Ltd",
+    "gr_date": "2026-05-14",
+    "currency": "INR",
+    "document_subtotal": 235000,
+    "document_total": 235000,
+    "gr_status": "Received",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "HP EliteBook Laptop",
+        "qty": 5,
+        "unit_price": 45000,
+        "line_amount": 225000
+      },
+      {
+        "line_no": 2,
+        "description": "Laptop Backpack",
+        "qty": 5,
+        "unit_price": 2000,
+        "line_amount": 10000
+      }
+    ],
+    "last_modified": "2026-05-14T10:22:00"
+  },
+
+  {
+    "document_type": "grn",
+    "gr_number": "GR90007",
+    "po_number": "PO450007",
+    "vendor_name": "Wipro Ltd",
+    "gr_date": "2026-05-14",
+    "currency": "INR",
+    "document_subtotal": 350000,
+    "document_total": 350000,
+    "gr_status": "Partial",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "Consulting Service",
+        "qty": 10,
+        "unit_price": 25000,
+        "line_amount": 250000
+      },
+      {
+        "line_no": 2,
+        "description": "Audit Support",
+        "qty": 1,
+        "unit_price": 100000,
+        "line_amount": 100000
+      }
+    ],
+    "last_modified": "2026-05-14T10:25:00"
+  },
+
+  {
+    "document_type": "grn",
+    "gr_number": "GR90008",
+    "po_number": "PO450008",
+    "vendor_name": "IBM India",
+    "gr_date": "2026-05-14",
+    "currency": "USD",
+    "document_subtotal": 12000,
+    "document_total": 12000,
+    "gr_status": "Received",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "Enterprise Consulting",
+        "qty": 2,
+        "unit_price": 5000,
+        "line_amount": 10000
+      },
+      {
+        "line_no": 2,
+        "description": "Software License",
+        "qty": 1,
+        "unit_price": 2000,
+        "line_amount": 2000
+      }
+    ],
+    "last_modified": "2026-05-14T10:28:00"
+  },
+
+  {
+    "document_type": "grn",
+    "gr_number": "GR90009",
+    "po_number": "PO450009",
+    "vendor_name": "Acer India",
+    "gr_date": "2026-05-14",
+    "currency": "INR",
+    "document_subtotal": 400000,
+    "document_total": 400000,
+    "gr_status": "Received",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "Acer Aspire Laptop",
+        "qty": 10,
+        "unit_price": 35000,
+        "line_amount": 350000
+      },
+      {
+        "line_no": 2,
+        "description": "Docking Station",
+        "qty": 10,
+        "unit_price": 5000,
+        "line_amount": 50000
+      }
+    ],
+    "last_modified": "2026-05-14T10:30:00"
+  },
+
+  {
+    "document_type": "grn",
+    "gr_number": "GR90010",
+    "po_number": "PO450010",
+    "vendor_name": "TCS Ltd",
+    "gr_date": "2026-05-14",
+    "currency": "INR",
+    "document_subtotal": 510000,
+    "document_total": 510000,
+    "gr_status": "Received",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "Managed Services",
+        "qty": 15,
+        "unit_price": 30000,
+        "line_amount": 450000
+      },
+      {
+        "line_no": 2,
+        "description": "Travel Charges",
+        "qty": 1,
+        "unit_price": 60000,
+        "line_amount": 60000
+      }
+    ],
+    "last_modified": "2026-05-14T10:35:00"
+  }
+]

@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+requests
+pandas
+schedule
+pdfplumber 
+pytesseract 
+pillow 
+pymupdf
+opencv-python
