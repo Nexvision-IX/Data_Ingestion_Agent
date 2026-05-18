@@ -1,22 +1,19 @@
 from pathlib import Path
 from dotenv import load_dotenv
-from PIL import Image
+from groq import Groq
 
-from google import genai
-
-import fitz
 import json
 import os
-
+from ingestion.master_ingestion import get_conn,init_db,upsert_invoice 
 
 # -----------------------------------
 # ENV
 # -----------------------------------
 
-load_dotenv(override=True)
+load_dotenv()
 
-client = genai.Client(
-    api_key=os.getenv("GEMINI_API_KEY")
+client = Groq(
+    api_key=os.getenv("GROQ_API_KEY")
 )
 
 
@@ -26,55 +23,32 @@ client = genai.Client(
 
 BASE_DIR = Path(__file__).parent
 
-INPUT_DIR = BASE_DIR / "unstructured_inputs"
+INPUT_DIR = BASE_DIR / "extracted_text"
 OUTPUT_DIR = BASE_DIR / "extracted_json"
 
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 
 # -----------------------------------
-# PDF TO IMAGES
+# LLM EXTRACTION
 # -----------------------------------
 
-def pdf_to_images(pdf_path):
+def extract_invoice_data(ocr_text):
 
-    images = []
+    prompt = f"""
+You are an invoice extraction engine.
 
-    pdf_document = fitz.open(pdf_path)
+Extract invoice data from this OCR text.
 
-    for page_num in range(len(pdf_document)):
-
-        page = pdf_document.load_page(page_num)
-
-        pix = page.get_pixmap(
-            matrix=fitz.Matrix(3, 3)
-        )
-
-        image_path = (
-            OUTPUT_DIR / f"temp_{page_num}.png"
-        )
-
-        pix.save(str(image_path))
-
-        images.append(image_path)
-
-    return images
-
-
-# -----------------------------------
-# GEMINI EXTRACTION
-# -----------------------------------
-
-def extract_invoice(file_path):
-
-    prompt = """
-Extract invoice data from this document.
+Correct obvious OCR mistakes if necessary.
 
 Return ONLY valid JSON.
 
 Schema:
-{
+
+{{
   "document_type": "invoice",
+  "source_system": "OCR_GROQ",
   "invoice_number": "",
   "po_number": "",
   "vendor_name": "",
@@ -86,94 +60,79 @@ Schema:
   "document_total": 0,
   "payment_status": "",
   "line_items": [
-    {
+    {{
       "line_no": 1,
       "description": "",
       "qty": 0,
       "unit_price": 0,
       "line_amount": 0
-    }
-  ]
-}
+    }}
+    ],
+    "last_modified": ""
+}}
 
-Correct obvious OCR mistakes if necessary.
-
-Return JSON only.
-Do not explain anything.
+OCR TEXT:
+{ocr_text}
 """
 
-    image_inputs = []
+    response = client.chat.completions.create(
 
-    # ---------------------------
-    # PDF INPUT
-    # ---------------------------
+        model="llama-3.3-70b-versatile",
 
-    if file_path.suffix.lower() == ".pdf":
+        messages=[
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
 
-        pdf_document = fitz.open(file_path)
+        temperature=0
 
-        for page_num in range(len(pdf_document)):
-
-            page = pdf_document.load_page(page_num)
-
-            pix = page.get_pixmap(
-                matrix=fitz.Matrix(3, 3)
-            )
-
-            temp_image_path = (
-                OUTPUT_DIR /
-                f"temp_{page_num}.png"
-            )
-
-            pix.save(str(temp_image_path))
-
-            img = Image.open(
-                temp_image_path
-            ).copy()
-
-            image_inputs.append(img)
-
-            os.remove(temp_image_path)
-
-    # ---------------------------
-    # IMAGE INPUT
-    # ---------------------------
-
-    else:
-
-        img = Image.open(file_path).copy()
-
-        image_inputs.append(img)
-
-    # ---------------------------
-    # GEMINI CALL
-    # ---------------------------
-
-    response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=[prompt] + image_inputs
     )
 
-    return response.text
+    return response.choices[0].message.content
+
+
 # -----------------------------------
-# PROCESS DOCUMENTS
+# PROCESS FILES
 # -----------------------------------
 
-def process_documents():
+def process_files():
 
-    files = list(INPUT_DIR.iterdir())
+    files = list(INPUT_DIR.glob("*.txt"))
 
-    print(f"\\nFiles Found: {len(files)}")
+    print(f"\nText Files Found: {len(files)}")
 
     for file_path in files:
 
-        print(f"\\nProcessing -> {file_path.name}")
+        print(f"\nProcessing -> {file_path.name}")
 
         try:
 
-            extracted_json = extract_invoice(file_path)
+            # ---------------------------
+            # READ OCR TEXT
+            # ---------------------------
 
-            # remove markdown if Gemini returns it
+            with open(
+                file_path,
+                "r",
+                encoding="utf-8"
+            ) as f:
+
+                ocr_text = f.read()
+
+            # ---------------------------
+            # LLM EXTRACTION
+            # ---------------------------
+
+            extracted_json = extract_invoice_data(
+                ocr_text
+            )
+
+            # ---------------------------
+            # CLEAN JSON
+            # ---------------------------
+
             extracted_json = (
                 extracted_json
                 .replace("```json", "")
@@ -184,6 +143,10 @@ def process_documents():
             parsed_json = json.loads(
                 extracted_json
             )
+
+            # ---------------------------
+            # SAVE JSON
+            # ---------------------------
 
             output_file = (
                 OUTPUT_DIR /
@@ -205,6 +168,13 @@ def process_documents():
             print(
                 f"JSON saved -> {output_file.name}"
             )
+            init_db()
+
+            with get_conn() as conn:
+                upsert_invoice(conn, parsed_json)
+                conn.commit()
+
+            print("Inserted into invoice_master")
 
         except Exception as e:
 
@@ -213,7 +183,7 @@ def process_documents():
             )
 
     print(
-        "\\nGEMINI VISION EXTRACTION COMPLETED"
+        "\nGROQ EXTRACTION COMPLETED"
     )
 
 
@@ -223,4 +193,4 @@ def process_documents():
 
 if __name__ == "__main__":
 
-    process_documents()
+    process_files()
