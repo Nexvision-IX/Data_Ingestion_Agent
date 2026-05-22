@@ -393,20 +393,28 @@ def upsert_gr(conn, row):
 # -----------------------------------
 
 def run_ingestion():
+
     init_db()
 
     last_run_time = get_last_run_time()
+
     print(f"\nLast Watermark: {last_run_time}")
 
     try:
+
         invoice_data = fetch_invoice_data(last_run_time)
+
         po_data = fetch_po_data(last_run_time)
+
         gr_data = fetch_gr_data(last_run_time)
 
+        invoice_rows = invoice_data.get("data", [])
+
+        po_rows = po_data.get("data", [])
+
+        gr_rows = gr_data.get("data", [])
+
         with get_conn() as conn:
-            invoice_rows = invoice_data.get("data", [])
-            po_rows = po_data.get("data", [])
-            gr_rows = gr_data.get("data", [])
 
             for row in invoice_rows:
                 upsert_invoice(conn, row)
@@ -419,20 +427,67 @@ def run_ingestion():
 
             conn.commit()
 
-        print(f"Upserted invoice rows: {len(invoice_data.get('data', []))}")
-        print(f"Upserted PO rows: {len(po_data.get('data', []))}")
-        print(f"Upserted GR rows: {len(gr_data.get('data', []))}")
+        print(
+            f"Upserted invoice rows: "
+            f"{len(invoice_rows)}"
+        )
 
-        latest_time = get_latest_modified_time(invoice_data, po_data, gr_data)
+        print(
+            f"Upserted PO rows: "
+            f"{len(po_rows)}"
+        )
+
+        print(
+            f"Upserted GR rows: "
+            f"{len(gr_rows)}"
+        )
+
+        latest_time = get_latest_modified_time(
+            invoice_data,
+            po_data,
+            gr_data
+        )
+
         if latest_time:
-            update_last_run_time(latest_time)
-        else:
-            print("No new records in any source. Watermark unchanged.")
 
-        print("\nINGESTION COMPLETED SUCCESSFULLY")
+            update_last_run_time(
+                latest_time
+            )
+
+        else:
+
+            print(
+                "No new records in any source. "
+                "Watermark unchanged."
+            )
+
+        print(
+            "\nINGESTION COMPLETED SUCCESSFULLY"
+        )
+
+        return {
+
+            "invoice_count": len(invoice_rows),
+
+            "po_count": len(po_rows),
+
+            "grn_count": len(gr_rows),
+
+            "status": "success"
+        }
 
     except Exception as e:
-        print(f"\nINGESTION FAILED: {e}")
+
+        print(
+            f"\nINGESTION FAILED: {e}"
+        )
+
+        return {
+
+            "status": "failed",
+
+            "error": str(e)
+        }
 
 # -----------------------------------
 # ENTRY POINT

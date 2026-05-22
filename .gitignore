@@ -17,6 +17,10 @@ state/
 # OCR outputs
 unstructured_ingestion/extracted_text/
 unstructured_ingestion/extracted_json/
+ocr_output/
+
+# Uploaded invoices
+unstructured_ingestion/unstructured_inputs/
 
 # Temp files
 *.log
@@ -25,8 +29,24 @@ temp/
 # VS Code
 .vscode/
 
+# Jupyter
+.ipynb_checkpoints/
+
+# Streamlit
+.streamlit/secrets.toml
+
 # OS
 .DS_Store
 Thumbs.db
 
+# Environment
 .env
+
+# Deployment
+*.pid
+
+# Master DB
+data/master/ap_master.db
+
+# Mock backups
+mock_data/*.bak

@@ -4,6 +4,8 @@ requests==2.32.3
 httpx==0.28.1
 python-dotenv==1.0.1
 pydantic==2.10.4
+pandas
+requests
 
 pymupdf==1.25.1
 pdfplumber==0.11.5
@@ -17,3 +19,4 @@ groq>=0.15,<1
 # optional later if you switch back to paid cloud LLMs
 # openai>=1.59,<2
 # google-genai>=0.6,<1
+streamlit==1.45.1
