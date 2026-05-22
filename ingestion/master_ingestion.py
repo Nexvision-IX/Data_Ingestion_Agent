@@ -1,26 +1,38 @@
+```python
 import json
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 
 from ingestion.clients.sap_client import SAPClient
-from ingestion.clients.kefron_client import KefronClient  # rename file to kefron_client.py
+from ingestion.clients.kefron_client import KefronClient
 
 # -----------------------------------
 # PATHS
 # -----------------------------------
 
 STATE_FILE = Path("state/last_run.json")
-MASTER_DB_PATH = Path("data/master/ap_master.db")
 
-STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-MASTER_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+MASTER_DB_PATH = Path(
+    "data/master/ap_master.db"
+)
+
+STATE_FILE.parent.mkdir(
+    parents=True,
+    exist_ok=True
+)
+
+MASTER_DB_PATH.parent.mkdir(
+    parents=True,
+    exist_ok=True
+)
 
 # -----------------------------------
 # CREATE CLIENTS
 # -----------------------------------
 
 sap_client = SAPClient()
+
 kefron_client = KefronClient()
 
 # -----------------------------------
@@ -28,121 +40,258 @@ kefron_client = KefronClient()
 # -----------------------------------
 
 def get_conn():
-    conn = sqlite3.connect(MASTER_DB_PATH)
-    conn.execute("PRAGMA foreign_keys = ON;")
+
+    conn = sqlite3.connect(
+        MASTER_DB_PATH
+    )
+
+    conn.execute(
+        "PRAGMA foreign_keys = ON;"
+    )
+
     return conn
 
+# -----------------------------------
+# INIT DATABASE
+# -----------------------------------
+
 def init_db():
+
     with get_conn() as conn:
+
         conn.execute("""
+
             CREATE TABLE IF NOT EXISTS invoice_master (
+
                 invoice_number TEXT PRIMARY KEY,
+
                 po_number TEXT,
+
                 vendor_name TEXT,
+
                 invoice_date TEXT,
+
                 currency TEXT,
 
                 document_subtotal REAL,
+
                 tax_amount REAL,
+
                 vat_percent REAL,
+
                 document_total REAL,
 
                 payment_status TEXT,
 
                 items_json TEXT,
+
                 raw_json TEXT,
 
                 last_modified TEXT,
+
                 updated_at TEXT
             )
+
         """)
 
         conn.execute("""
+
             CREATE TABLE IF NOT EXISTS sap_po_master (
+
                 po_number TEXT PRIMARY KEY,
+
                 vendor_name TEXT,
+
                 po_date TEXT,
+
                 currency TEXT,
 
                 document_subtotal REAL,
+
                 tax_amount REAL,
+
                 vat_percent REAL,
+
                 document_total REAL,
 
                 po_status TEXT,
 
                 items_json TEXT,
+
                 raw_json TEXT,
 
                 last_modified TEXT,
+
                 updated_at TEXT
             )
+
         """)
 
         conn.execute("""
+
             CREATE TABLE IF NOT EXISTS sap_grn_master (
+
                 gr_number TEXT PRIMARY KEY,
+
                 po_number TEXT,
+
                 vendor_name TEXT,
+
                 gr_date TEXT,
+
                 currency TEXT,
 
                 document_subtotal REAL,
+
                 document_total REAL,
 
                 gr_status TEXT,
 
                 items_json TEXT,
+
                 raw_json TEXT,
 
                 last_modified TEXT,
+
                 updated_at TEXT
             )
+
         """)
+
 # -----------------------------------
 # WATERMARK / CHECKPOINT
 # -----------------------------------
 
 def get_last_run_time():
+
     if not STATE_FILE.exists():
+
         return None
 
-    with open(STATE_FILE, "r") as f:
+    with open(
+        STATE_FILE,
+        "r"
+    ) as f:
+
         state = json.load(f)
 
-    return state.get("last_run_time")
+    last_run = state.get(
+        "last_run_time"
+    )
+
+    if not last_run:
+
+        return None
+
+    try:
+
+        return (
+
+            datetime
+            .fromisoformat(last_run)
+            .date()
+            .isoformat()
+
+        )
+
+    except Exception:
+
+        return None
 
 def update_last_run_time(new_time):
-    with open(STATE_FILE, "w") as f:
-        json.dump({"last_run_time": new_time}, f, indent=4)
 
-    print(f"Updated watermark -> {new_time}")
+    date_only = (
+
+        datetime
+        .fromisoformat(new_time)
+        .date()
+        .isoformat()
+
+    )
+
+    with open(
+        STATE_FILE,
+        "w"
+    ) as f:
+
+        json.dump(
+
+            {
+                "last_run_time":
+                    date_only
+            },
+
+            f,
+
+            indent=4
+        )
+
+    print(
+        f"Updated watermark -> "
+        f"{date_only}"
+    )
 
 def get_latest_modified_time(*datasets):
+
     latest_dt = None
 
     for dataset in datasets:
+
         for row in dataset.get("data", []):
-            ts = row.get("last_modified")
+
+            ts = row.get(
+                "last_modified"
+            )
+
             if not ts:
+
                 continue
 
             try:
-                row_dt = datetime.fromisoformat(ts)
+
+                row_dt = (
+
+                    datetime
+                    .fromisoformat(ts)
+                    .date()
+
+                )
+
             except ValueError:
+
                 continue
 
-            if latest_dt is None or row_dt > latest_dt:
+            if (
+
+                latest_dt is None
+                or row_dt > latest_dt
+
+            ):
+
                 latest_dt = row_dt
 
-    return latest_dt.isoformat(timespec="seconds") if latest_dt else None
+    return (
+
+        latest_dt.isoformat()
+        if latest_dt
+        else None
+
+    )
+
 # -----------------------------------
 # HELPERS
 # -----------------------------------
 
 def build_params(since_date):
+
     if since_date:
-        return {"since_date": since_date}
+
+        return {
+
+            "since_date":
+                since_date
+        }
+
     return None
 
 # -----------------------------------
@@ -150,23 +299,73 @@ def build_params(since_date):
 # -----------------------------------
 
 def fetch_invoice_data(since_date):
-    print("\nFetching Invoice Data from Kefron...")
-    data = kefron_client.get("/kefron/invoices", params=build_params(since_date))
-    print(f"Invoice Records Found: {data['count']}")
+
+    print(
+        "\nFetching Invoice Data "
+        "from Kefron..."
+    )
+
+    data = kefron_client.get(
+
+        "/kefron/invoices",
+
+        params=build_params(
+            since_date
+        )
+    )
+
+    print(
+        f"Invoice Records Found: "
+        f"{data['count']}"
+    )
+
     return data
 
 def fetch_po_data(since_date):
-    print("\nFetching PO Data from SAP...")
-    data = sap_client.get("/sap/po", params=build_params(since_date))
-    print(f"PO Records Found: {data['count']}")
+
+    print(
+        "\nFetching PO Data "
+        "from SAP..."
+    )
+
+    data = sap_client.get(
+
+        "/sap/po",
+
+        params=build_params(
+            since_date
+        )
+    )
+
+    print(
+        f"PO Records Found: "
+        f"{data['count']}"
+    )
+
     return data
 
 def fetch_gr_data(since_date):
-    print("\nFetching GR Data from SAP...")
-    data = sap_client.get("/sap/gr", params=build_params(since_date))
-    print(f"GR Records Found: {data['count']}")
-    return data
 
+    print(
+        "\nFetching GR Data "
+        "from SAP..."
+    )
+
+    data = sap_client.get(
+
+        "/sap/gr",
+
+        params=build_params(
+            since_date
+        )
+    )
+
+    print(
+        f"GR Records Found: "
+        f"{data['count']}"
+    )
+
+    return data
 
 # -----------------------------------
 # UPSERT FUNCTIONS
@@ -174,7 +373,9 @@ def fetch_gr_data(since_date):
 
 def upsert_invoice(conn, row):
 
-    now = datetime.now().isoformat(timespec="seconds")
+    now = datetime.now().isoformat(
+        timespec="seconds"
+    )
 
     conn.execute("""
 
@@ -238,7 +439,9 @@ def upsert_invoice(conn, row):
 
         row.get("payment_status"),
 
-        json.dumps(row.get("line_items", [])),
+        json.dumps(
+            row.get("line_items", [])
+        ),
 
         json.dumps(row),
 
