@@ -73,7 +73,11 @@ def filter_by_since(data: List[Dict[str, Any]], since_date: Optional[str]) -> Li
         return data
 
     try:
-        since_dt = datetime.fromisoformat(since_date)
+        since_dt = (
+    datetime
+    .fromisoformat(since_date)
+    .date()
+)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid since_date: {since_date}") from exc
 
@@ -83,7 +87,11 @@ def filter_by_since(data: List[Dict[str, Any]], since_date: Optional[str]) -> Li
         if not ts:
             continue
         try:
-            row_dt = datetime.fromisoformat(ts)
+            row_dt = (
+    datetime
+    .fromisoformat(ts)
+    .date()
+)
         except ValueError:
             continue
         if row_dt > since_dt:
