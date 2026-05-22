@@ -1,22 +1,25 @@
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
+
+streamlit==1.45.1
+
 requests==2.32.3
 httpx==0.28.1
+
 python-dotenv==1.0.1
+python-multipart==0.0.20
+
 pydantic==2.10.4
-pandas
-requests
+
+pandas==2.2.3
+numpy==1.26.4
 
 pymupdf==1.25.1
 pdfplumber==0.11.5
 Pillow==11.1.0
+
 pytesseract==0.3.13
-opencv-python==4.10.0.84
-numpy==1.26.4
+
+opencv-python-headless==4.10.0.84
 
 groq>=0.15,<1
-
-# optional later if you switch back to paid cloud LLMs
-# openai>=1.59,<2
-# google-genai>=0.6,<1
-streamlit==1.45.1
