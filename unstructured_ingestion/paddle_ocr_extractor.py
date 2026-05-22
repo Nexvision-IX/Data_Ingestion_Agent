@@ -2,16 +2,34 @@ from pathlib import Path
 import os
 import json
 import fitz
-from paddleocr import PaddleOCR
+
+# IMPORTANT:
+# DO NOT initialize PaddleOCR globally
+
+ocr = None
 
 # =========================================================
-# OCR INITIALIZATION
+# OCR LOADER
 # =========================================================
 
-ocr = PaddleOCR(
-    use_angle_cls=True,
-    lang="en"
-)
+def get_ocr():
+
+    global ocr
+
+    if ocr is None:
+
+        from paddleocr import PaddleOCR
+
+        ocr = PaddleOCR(
+
+            use_angle_cls=False,
+
+            lang="en",
+
+            show_log=False
+        )
+
+    return ocr
 
 # =========================================================
 # PATHS
@@ -31,13 +49,8 @@ DEBUG_DIR = (
     BASE_DIR / "structured_debug"
 )
 
-OUTPUT_DIR.mkdir(
-    exist_ok=True
-)
-
-DEBUG_DIR.mkdir(
-    exist_ok=True
-)
+OUTPUT_DIR.mkdir(exist_ok=True)
+DEBUG_DIR.mkdir(exist_ok=True)
 
 # =========================================================
 # HEADING KEYWORDS
@@ -78,7 +91,7 @@ HEADING_KEYWORDS = [
 ]
 
 # =========================================================
-# UTILITIES
+# TEXT CLEANER
 # =========================================================
 
 def normalize_text(text):
@@ -90,20 +103,18 @@ def normalize_text(text):
     )
 
 # =========================================================
-# OCR STRUCTURED EXTRACTION
+# OCR EXTRACTION
 # =========================================================
 
 def extract_text(image_path):
 
-    result = ocr.ocr(
+    ocr_engine = get_ocr()
+
+    result = ocr_engine.ocr(
         str(image_path)
     )
 
     words = []
-
-    # -----------------------------------------------------
-    # EXTRACT WORDS + COORDINATES
-    # -----------------------------------------------------
 
     for page in result:
 
@@ -122,7 +133,6 @@ def extract_text(image_path):
 
                 confidence = item[1][1]
 
-                # skip weak OCR
                 if confidence < 0.50:
                     continue
 
@@ -139,42 +149,26 @@ def extract_text(image_path):
                     for point in box
                 )
 
-                x_max = max(
-                    point[0]
-                    for point in box
-                )
-
-                y_max = max(
-                    point[1]
-                    for point in box
-                )
-
                 words.append({
 
                     "text": text,
 
-                    "x_min": x_min,
+                    "x": x_min,
 
-                    "y_min": y_min,
-
-                    "x_max": x_max,
-
-                    "y_max": y_max
+                    "y": y_min
                 })
 
             except Exception:
-
                 continue
 
     # -----------------------------------------------------
-    # SORT WORDS TOP TO BOTTOM
+    # SORT WORDS
     # -----------------------------------------------------
 
     words.sort(
-
         key=lambda w: (
-            w["y_min"],
-            w["x_min"]
+            w["y"],
+            w["x"]
         )
     )
 
@@ -196,34 +190,28 @@ def extract_text(image_path):
 
             current_line.append(word)
 
-            current_y = word["y_min"]
+            current_y = word["y"]
 
             continue
 
-        # SAME VISUAL LINE
-        if abs(
-            word["y_min"] - current_y
-        ) <= Y_THRESHOLD:
+        if abs(word["y"] - current_y) <= Y_THRESHOLD:
 
             current_line.append(word)
 
         else:
 
-            # SAVE PREVIOUS LINE
             lines.append(current_line)
 
-            # START NEW LINE
             current_line = [word]
 
-            current_y = word["y_min"]
+            current_y = word["y"]
 
-    # APPEND LAST LINE
     if current_line:
 
         lines.append(current_line)
 
     # -----------------------------------------------------
-    # REBUILD LINES LEFT TO RIGHT
+    # REBUILD LINES
     # -----------------------------------------------------
 
     structured_lines = []
@@ -231,7 +219,7 @@ def extract_text(image_path):
     for line_words in lines:
 
         line_words.sort(
-            key=lambda w: w["x_min"]
+            key=lambda w: w["x"]
         )
 
         line_text = " ".join(
@@ -250,20 +238,14 @@ def extract_text(image_path):
             )
 
     # -----------------------------------------------------
-    # SEMANTIC HEADING STRUCTURE
+    # SEMANTIC STRUCTURE
     # -----------------------------------------------------
 
     semantic_lines = []
 
-    previous_line_y = None
-
-    for idx, line in enumerate(structured_lines):
+    for line in structured_lines:
 
         lower_line = line.lower()
-
-        # ---------------------------------------------
-        # ADD HEADING BREAKS
-        # ---------------------------------------------
 
         heading_found = False
 
@@ -271,10 +253,7 @@ def extract_text(image_path):
 
             if keyword in lower_line:
 
-                semantic_lines.append(
-                    ""
-                )
-
+                semantic_lines.append("")
                 semantic_lines.append(
                     line.upper()
                 )
@@ -285,48 +264,10 @@ def extract_text(image_path):
 
         if not heading_found:
 
-            semantic_lines.append(
-                line
-            )
-
-    # -----------------------------------------------------
-    # FINAL CLEANUP
-    # -----------------------------------------------------
+            semantic_lines.append(line)
 
     final_text = "\n".join(
         semantic_lines
-    )
-
-    final_text = "\n".join(
-
-        line.strip()
-
-        for line in final_text.split("\n")
-    )
-
-    # REMOVE EXTRA BLANK LINES
-    cleaned_lines = []
-
-    previous_blank = False
-
-    for line in final_text.split("\n"):
-
-        if not line.strip():
-
-            if not previous_blank:
-
-                cleaned_lines.append("")
-
-            previous_blank = True
-
-        else:
-
-            cleaned_lines.append(line)
-
-            previous_blank = False
-
-    final_text = "\n".join(
-        cleaned_lines
     )
 
     return final_text.strip()
@@ -346,7 +287,7 @@ def process_document(file_path):
     try:
 
         # -------------------------------------------------
-        # PDF FILE
+        # PDF
         # -------------------------------------------------
 
         if file_path.suffix.lower() == ".pdf":
@@ -399,7 +340,7 @@ def process_document(file_path):
                 )
 
         # -------------------------------------------------
-        # IMAGE FILE
+        # IMAGE
         # -------------------------------------------------
 
         else:
@@ -409,7 +350,7 @@ def process_document(file_path):
             )
 
         # -------------------------------------------------
-        # SAVE OCR TEXT
+        # SAVE OUTPUT
         # -------------------------------------------------
 
         output_file = (
@@ -428,10 +369,6 @@ def process_document(file_path):
         ) as f:
 
             f.write(final_text)
-
-        # -------------------------------------------------
-        # SAVE DEBUG STRUCTURED FILE
-        # -------------------------------------------------
 
         debug_file = (
 
@@ -454,99 +391,12 @@ def process_document(file_path):
             f"Text saved -> {output_file.name}"
         )
 
-        print(
-            f"Structured debug saved -> "
-            f"{debug_file.name}"
-        )
-
         return output_file
 
     except Exception as e:
 
         print(
-            f"Failed -> "
-            f"{file_path.name}: {e}"
+            f"Failed -> {file_path.name}: {e}"
         )
 
         return None
-
-# =========================================================
-# MAIN
-# =========================================================
-
-if __name__ == "__main__":
-
-    processed_file_path = (
-
-        BASE_DIR /
-
-        "processed_files.json"
-    )
-
-    # -----------------------------------------------------
-    # LOAD PROCESSED FILES
-    # -----------------------------------------------------
-
-    with open(
-
-        processed_file_path,
-        "r",
-        encoding="utf-8"
-
-    ) as f:
-
-        processed_files = json.load(f)
-
-    # -----------------------------------------------------
-    # GET NEW FILES ONLY
-    # -----------------------------------------------------
-
-    files = [
-
-        f for f in INPUT_DIR.iterdir()
-
-        if f.name not in processed_files
-    ]
-
-    print(
-        f"\nNew Files Found: {len(files)}"
-    )
-
-    # -----------------------------------------------------
-    # PROCESS FILES
-    # -----------------------------------------------------
-
-    for file_path in files:
-
-        result = process_document(
-            file_path
-        )
-
-        if result:
-
-            processed_files.append(
-                file_path.name
-            )
-
-    # -----------------------------------------------------
-    # SAVE UPDATED LIST
-    # -----------------------------------------------------
-
-    with open(
-
-        processed_file_path,
-        "w",
-        encoding="utf-8"
-
-    ) as f:
-
-        json.dump(
-
-            processed_files,
-            f,
-            indent=4
-        )
-
-    print(
-        "\nNEW FILE OCR COMPLETED"
-    )
