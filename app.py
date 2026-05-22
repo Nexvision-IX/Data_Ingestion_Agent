@@ -434,7 +434,7 @@ elif selected_module == "Manual Data Entry (API)":
                     }
 
                     response = requests.post(
-                        "https://ap-automation-api.onrender.com/kefron/invoices",
+                        "https://data-ingestion-agent.onrender.com/kefron/invoices",
                         json=payload,
                         headers={"Authorization": "Bearer mock_kefron_token"},
                         timeout=60,
@@ -506,7 +506,7 @@ elif selected_module == "Manual Data Entry (API)":
                     }
 
                     response = requests.post(
-                        "https://ap-automation-api.onrender.com/sap/po",
+                        "https://data-ingestion-agent.onrender.com/sap/po",
                         json=payload,
                         auth=("sap_user", "sap_pass"),
                         timeout=60,
@@ -578,7 +578,7 @@ elif selected_module == "Manual Data Entry (API)":
                     }
 
                     response = requests.post(
-                        "https://ap-automation-api.onrender.com/sap/grn",
+                        "https://data-ingestion-agent.onrender.com/sap/grn",
                         json=payload,
                         auth=("sap_user", "sap_pass"),
                         timeout=60,
