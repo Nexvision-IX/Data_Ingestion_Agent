@@ -8,6 +8,18 @@ import sqlite3
 import pandas as pd
 import requests
 import streamlit as st
+from ingestion.master_ingestion import (
+
+    delete_invoice,
+    delete_po,
+    delete_grn,
+
+    clear_invoice_table,
+    clear_po_table,
+    clear_grn_table,
+
+    keep_latest_rows
+)
 
 from pipeline_runner import process_invoice_pipeline, sync_structured_sources
 
@@ -207,6 +219,7 @@ selected_module = st.sidebar.radio(
         "Structured Data Intake (API)",
         "Invoice Processing (PDF/Image)",
         "Manual Data Entry (API)",
+        "Admin Data Manager",
     ],
 )
 
@@ -593,3 +606,168 @@ elif selected_module == "Manual Data Entry (API)":
                     st.exception(e)
         except Exception as grn_exception:
             st.error(f"Error in GRN creation form: {grn_exception}")
+
+# -----------------------------------
+# ADMIN DATA MANAGER
+# -----------------------------------
+
+elif selected_module == "Admin Data Manager":
+
+    st.header(
+        "Admin Data Manager"
+    )
+
+    st.warning(
+        "Danger Zone - Database Operations"
+    )
+
+    # ===================================
+    # DELETE SINGLE ROWS
+    # ===================================
+
+    st.subheader(
+        "Delete Single Records"
+    )
+
+    delete_invoice_no = st.text_input(
+        "Invoice Number",
+        key="delete_invoice"
+    )
+
+    if st.button(
+        "Delete Invoice",
+        key="delete_invoice_btn"
+    ):
+
+        delete_invoice(
+            delete_invoice_no
+        )
+
+        st.success(
+            "Invoice deleted."
+        )
+
+    delete_po_no = st.text_input(
+        "PO Number",
+        key="delete_po"
+    )
+
+    if st.button(
+        "Delete PO",
+        key="delete_po_btn"
+    ):
+
+        delete_po(
+            delete_po_no
+        )
+
+        st.success(
+            "PO deleted."
+        )
+
+    delete_grn_no = st.text_input(
+        "GRN Number",
+        key="delete_grn"
+    )
+
+    if st.button(
+        "Delete GRN",
+        key="delete_grn_btn"
+    ):
+
+        delete_grn(
+            delete_grn_no
+        )
+
+        st.success(
+            "GRN deleted."
+        )
+
+    # ===================================
+    # CLEAR TABLES
+    # ===================================
+
+    st.subheader(
+        "Clear Tables"
+    )
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+
+        if st.button(
+            "Clear Invoice Table"
+        ):
+
+            clear_invoice_table()
+
+            st.success(
+                "Invoice table cleared."
+            )
+
+    with col2:
+
+        if st.button(
+            "Clear PO Table"
+        ):
+
+            clear_po_table()
+
+            st.success(
+                "PO table cleared."
+            )
+
+    with col3:
+
+        if st.button(
+            "Clear GRN Table"
+        ):
+
+            clear_grn_table()
+
+            st.success(
+                "GRN table cleared."
+            )
+
+    # ===================================
+    # KEEP ONLY LATEST ROWS
+    # ===================================
+
+    st.subheader(
+        "Keep Latest Rows"
+    )
+
+    keep_count = st.number_input(
+
+        "Rows to Keep",
+
+        min_value=1,
+
+        value=10
+    )
+
+    selected_table = st.selectbox(
+
+        "Select Table",
+
+        [
+            "invoice_master",
+            "po_master",
+            "grn_master"
+        ]
+    )
+
+    if st.button(
+        "Apply Cleanup"
+    ):
+
+        keep_latest_rows(
+
+            selected_table,
+
+            keep_count
+        )
+
+        st.success(
+            "Cleanup completed."
+        )

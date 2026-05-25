@@ -697,3 +697,133 @@ def run_ingestion():
 
 if __name__ == "__main__":
     run_ingestion()
+
+
+def delete_invoice(invoice_number):
+
+    with get_conn() as conn:
+
+        cursor = conn.cursor()
+
+        cursor.execute(
+
+            """
+            DELETE FROM invoice_master
+            WHERE invoice_number = ?
+            """,
+
+            (invoice_number,)
+        )
+
+        conn.commit()
+
+
+def delete_po(po_number):
+
+    with get_conn() as conn:
+
+        cursor = conn.cursor()
+
+        cursor.execute(
+
+            """
+            DELETE FROM po_master
+            WHERE po_number = ?
+            """,
+
+            (po_number,)
+        )
+
+        conn.commit()
+
+
+def delete_grn(grn_number):
+
+    with get_conn() as conn:
+
+        cursor = conn.cursor()
+
+        cursor.execute(
+
+            """
+            DELETE FROM grn_master
+            WHERE grn_number = ?
+            """,
+
+            (grn_number,)
+        )
+
+        conn.commit()
+
+
+def clear_invoice_table():
+
+    with get_conn() as conn:
+
+        cursor = conn.cursor()
+
+        cursor.execute(
+            "DELETE FROM invoice_master"
+        )
+
+        conn.commit()
+
+
+def clear_po_table():
+
+    with get_conn() as conn:
+
+        cursor = conn.cursor()
+
+        cursor.execute(
+            "DELETE FROM po_master"
+        )
+
+        conn.commit()
+
+
+def clear_grn_table():
+
+    with get_conn() as conn:
+
+        cursor = conn.cursor()
+
+        cursor.execute(
+            "DELETE FROM grn_master"
+        )
+
+        conn.commit()
+
+
+def keep_latest_rows(
+    table_name,
+    keep_count=10
+):
+
+    with get_conn() as conn:
+
+        cursor = conn.cursor()
+
+        query = f"""
+
+        DELETE FROM {table_name}
+
+        WHERE rowid NOT IN (
+
+            SELECT rowid
+
+            FROM {table_name}
+
+            ORDER BY last_modified DESC
+
+            LIMIT ?
+
+        )
+        """
+
+        cursor.execute(
+            query,
+            (keep_count,)
+        )
+
+        conn.commit()
