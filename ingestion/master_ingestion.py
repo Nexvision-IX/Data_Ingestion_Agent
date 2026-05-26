@@ -184,29 +184,13 @@ def get_last_run_time():
 
     try:
 
-        return (
-
-            datetime
-            .fromisoformat(last_run)
-            .date()
-            .isoformat()
-
-        )
+        return last_run
 
     except Exception:
 
         return None
 
 def update_last_run_time(new_time):
-
-    date_only = (
-
-        datetime
-        .fromisoformat(new_time)
-        .date()
-        .isoformat()
-
-    )
 
     with open(
         STATE_FILE,
@@ -217,7 +201,7 @@ def update_last_run_time(new_time):
 
             {
                 "last_run_time":
-                    date_only
+                    new_time
             },
 
             f,
@@ -227,7 +211,7 @@ def update_last_run_time(new_time):
 
     print(
         f"Updated watermark -> "
-        f"{date_only}"
+        f"{new_time}"
     )
 
 def get_latest_modified_time(*datasets):
@@ -248,13 +232,7 @@ def get_latest_modified_time(*datasets):
 
             try:
 
-                row_dt = (
-
-                    datetime
-                    .fromisoformat(ts)
-                    .date()
-
-                )
+                row_dt = datetime.fromisoformat(ts)
 
             except ValueError:
 
