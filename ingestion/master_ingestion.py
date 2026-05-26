@@ -776,7 +776,7 @@ def clear_po_table():
         cursor = conn.cursor()
 
         cursor.execute(
-            "DELETE FROM po_master"
+            "DELETE FROM sap_po_master"
         )
 
         conn.commit()
@@ -789,7 +789,7 @@ def clear_grn_table():
         cursor = conn.cursor()
 
         cursor.execute(
-            "DELETE FROM grn_master"
+            "DELETE FROM sap_grn_master"
         )
 
         conn.commit()
