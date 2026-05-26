@@ -727,7 +727,7 @@ def delete_po(po_number):
         cursor.execute(
 
             """
-            DELETE FROM po_master
+            DELETE FROM sap_po_master
             WHERE po_number = ?
             """,
 
@@ -746,7 +746,7 @@ def delete_grn(grn_number):
         cursor.execute(
 
             """
-            DELETE FROM grn_master
+            DELETE FROM sap_grn_master
             WHERE grn_number = ?
             """,
 
