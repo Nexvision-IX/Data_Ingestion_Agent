@@ -213,7 +213,6 @@ def update_last_run_time(new_time):
         f"Updated watermark -> "
         f"{new_time}"
     )
-
 def get_latest_modified_time(*datasets):
 
     latest_dt = None
