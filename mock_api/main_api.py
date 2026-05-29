@@ -9,7 +9,9 @@ from typing import Any, Dict, List, Optional
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.security import HTTPBasic, HTTPBasicCredentials, HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
-
+from ingestion.master_ingestion import (
+    reset_demo_environment
+)
 basic_auth = HTTPBasic()
 bearer_auth = HTTPBearer()
 
@@ -68,34 +70,52 @@ def normalize_dt(value: Optional[str]) -> str:
     return datetime.now().isoformat()
 
 
-def filter_by_since(data: List[Dict[str, Any]], since_date: Optional[str]) -> List[Dict[str, Any]]:
+def filter_by_since(
+    data,
+    since_date
+):
+
     if not since_date:
         return data
 
     try:
-        since_dt = (
-    datetime
-    .fromisoformat(since_date)
-    .date()
-)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid since_date: {since_date}") from exc
 
-    filtered: List[Dict[str, Any]] = []
+        since_dt = datetime.fromisoformat(
+            since_date
+        )
+
+    except ValueError:
+
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid since_date: {since_date}"
+        )
+
+    filtered = []
+
     for row in data:
-        ts = row.get("last_modified")
+
+        ts = row.get(
+            "last_modified"
+        )
+
         if not ts:
             continue
+
         try:
-            row_dt = (
-    datetime
-    .fromisoformat(ts)
-    .date()
-)
+
+            row_dt = datetime.fromisoformat(
+                ts
+            )
+
         except ValueError:
             continue
+
         if row_dt > since_dt:
-            filtered.append(row)
+
+            filtered.append(
+                row
+            )
 
     return filtered
 

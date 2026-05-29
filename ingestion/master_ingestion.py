@@ -804,3 +804,38 @@ def keep_latest_rows(
         )
 
         conn.commit()
+def reset_demo_environment():
+
+    # reset watermark
+    with open(
+        STATE_FILE,
+        "w"
+    ) as f:
+
+        json.dump(
+            {
+                "last_run_time": None
+            },
+            f,
+            indent=4
+        )
+
+    with get_conn() as conn:
+
+        conn.execute(
+            "DELETE FROM invoice_master"
+        )
+
+        conn.execute(
+            "DELETE FROM sap_po_master"
+        )
+
+        conn.execute(
+            "DELETE FROM sap_grn_master"
+        )
+
+        conn.commit()
+
+    return {
+        "status": "success"
+    }

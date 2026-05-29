@@ -18,7 +18,8 @@ from ingestion.master_ingestion import (
     clear_po_table,
     clear_grn_table,
 
-    keep_latest_rows
+    keep_latest_rows,
+    reset_demo_environment
 )
 
 from pipeline_runner import process_invoice_pipeline, sync_structured_sources
@@ -28,7 +29,7 @@ from pipeline_runner import process_invoice_pipeline, sync_structured_sources
 # -----------------------------------
 
 DB_PATH = "data/master/ap_master.db"
-
+API_BASE_URL = "https://data-ingestion-agent.onrender.com"
 # -----------------------------------
 # INPUT DIRECTORY
 # -----------------------------------
@@ -447,7 +448,7 @@ elif selected_module == "Manual Data Entry (API)":
                     }
 
                     response = requests.post(
-                        "https://data-ingestion-agent.onrender.com/kefron/invoices",
+                        f"{API_BASE_URL}/kefron/invoices",
                         json=payload,
                         headers={"Authorization": "Bearer mock_kefron_token"},
                         timeout=60,
@@ -519,7 +520,7 @@ elif selected_module == "Manual Data Entry (API)":
                     }
 
                     response = requests.post(
-                        "https://data-ingestion-agent.onrender.com/sap/po",
+                        f"{API_BASE_URL}/sap/po",
                         json=payload,
                         auth=("sap_user", "sap_pass"),
                         timeout=60,
@@ -591,7 +592,7 @@ elif selected_module == "Manual Data Entry (API)":
                     }
 
                     response = requests.post(
-                        "https://data-ingestion-agent.onrender.com/sap/grn",
+                        f"{API_BASE_URL}/sap/grn",
                         json=payload,
                         auth=("sap_user", "sap_pass"),
                         timeout=60,
@@ -620,7 +621,42 @@ elif selected_module == "Admin Data Manager":
     st.warning(
         "Danger Zone - Database Operations"
     )
+    st.divider()
 
+confirm_reset = st.checkbox(
+    "I understand this will clear demo state",
+    key="confirm_reset_demo"
+)
+
+if confirm_reset and st.button(
+    "Reset Demo Environment",
+    key="reset_demo_btn"
+):
+
+    try:
+
+        result = reset_demo_environment()
+
+        if result.get("status") == "success":
+
+            st.success(
+                "Demo environment reset."
+            )
+
+            st.rerun()
+
+        else:
+
+            st.error(
+                result.get(
+                    "error",
+                    "Reset failed"
+                )
+            )
+
+    except Exception as e:
+
+        st.exception(e)
     # ===================================
     # DELETE SINGLE ROWS
     # ===================================
@@ -751,10 +787,10 @@ elif selected_module == "Admin Data Manager":
         "Select Table",
 
         [
-            "invoice_master",
-            "po_master",
-            "grn_master"
-        ]
+    "invoice_master",
+    "sap_po_master",
+    "sap_grn_master"
+]
     )
 
     if st.button(
