@@ -678,7 +678,63 @@ elif selected_module == "Admin Data Manager":
     st.subheader(
         "Delete Single Records"
     )
+    st.subheader(
+        "Delete Single Records"
+    )
 
+    delete_invoice_no = st.text_input(
+        "Invoice Number",
+        key="delete_invoice"
+    )
+
+    if st.button(
+        "Delete Invoice",
+        key="delete_invoice_btn"
+    ):
+
+        delete_invoice(
+            delete_invoice_no
+        )
+
+        st.success(
+            "Invoice deleted."
+        )
+
+    delete_po_no = st.text_input(
+        "PO Number",
+        key="delete_po"
+    )
+
+    if st.button(
+        "Delete PO",
+        key="delete_po_btn"
+    ):
+
+        delete_po(
+            delete_po_no
+        )
+
+        st.success(
+            "PO deleted."
+        )
+
+    delete_grn_no = st.text_input(
+        "GRN Number",
+        key="delete_grn"
+    )
+
+    if st.button(
+        "Delete GRN",
+        key="delete_grn_btn"
+    ):
+
+        delete_grn(
+            delete_grn_no
+        )
+
+        st.success(
+            "GRN deleted."
+        )
     # Your delete invoice code
     # Your delete po code
     # Your delete grn code
@@ -694,6 +750,44 @@ elif selected_module == "Admin Data Manager":
     )
 
     # Your clear table code
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+
+        if st.button(
+            "Clear Invoice Table"
+        ):
+
+            clear_invoice_table()
+
+            st.success(
+                "Invoice table cleared."
+            )
+
+    with col2:
+
+        if st.button(
+            "Clear PO Table"
+        ):
+
+            clear_po_table()
+
+            st.success(
+                "PO table cleared."
+            )
+
+    with col3:
+
+        if st.button(
+            "Clear GRN Table"
+        ):
+
+            clear_grn_table()
+
+            st.success(
+                "GRN table cleared."
+            )
+
 
     st.divider()
 
@@ -705,4 +799,41 @@ elif selected_module == "Admin Data Manager":
         "Keep Latest Rows"
     )
 
-    # Your cleanup code
+    st.subheader(
+        "Keep Latest Rows"
+    )
+
+    keep_count = st.number_input(
+
+        "Rows to Keep",
+
+        min_value=1,
+
+        value=10
+    )
+
+    selected_table = st.selectbox(
+
+        "Select Table",
+
+        [
+    "invoice_master",
+    "sap_po_master",
+    "sap_grn_master"
+]
+    )
+
+    if st.button(
+        "Apply Cleanup"
+    ):
+
+        keep_latest_rows(
+
+            selected_table,
+
+            keep_count
+        )
+
+        st.success(
+            "Cleanup completed."
+        )
