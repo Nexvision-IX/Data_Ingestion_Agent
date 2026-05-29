@@ -184,7 +184,120 @@ def health():
         "timestamp": datetime.now().isoformat()
     }
 
+#------------DELETE INVOICE ----------
 
+@app.delete("/kefron/invoices/{invoice_number}")
+def delete_invoice(invoice_number: str):
+
+    global INVOICES
+
+    original_count = len(INVOICES)
+
+    INVOICES = [
+        row
+        for row in INVOICES
+        if row.get("invoice_number") != invoice_number
+    ]
+
+    if len(INVOICES) == original_count:
+
+        return {
+            "status": "not_found",
+            "invoice_number": invoice_number
+        }
+
+    with open(
+        BASE_DIR / "mock_data/invoices.json",
+        "w"
+    ) as f:
+
+        json.dump(
+            INVOICES,
+            f,
+            indent=4
+        )
+
+    return {
+        "status": "deleted",
+        "invoice_number": invoice_number
+    }
+
+#------------DELETE PO ----------
+
+@app.delete("/sap/po/{po_number}")
+def delete_po(po_number: str):
+
+    global POS
+
+    original_count = len(POS)
+
+    POS = [
+        row
+        for row in POS
+        if row.get("po_number") != po_number
+    ]
+
+    if len(POS) == original_count:
+
+        return {
+            "status": "not_found",
+            "po_number": po_number
+        }
+
+    with open(
+        BASE_DIR / "mock_data/pos.json",
+        "w"
+    ) as f:
+
+        json.dump(
+            POS,
+            f,
+            indent=4
+        )
+
+    return {
+        "status": "deleted",
+        "po_number": po_number
+    }
+
+#------------DELETE GRN ----------
+
+
+@app.delete("/sap/gr/{gr_number}")
+def delete_grn(gr_number: str):
+
+    global GRNS
+
+    original_count = len(GRNS)
+
+    GRNS = [
+        row
+        for row in GRNS
+        if row.get("gr_number") != gr_number
+    ]
+
+    if len(GRNS) == original_count:
+
+        return {
+            "status": "not_found",
+            "gr_number": gr_number
+        }
+
+    with open(
+        BASE_DIR / "mock_data/grns.json",
+        "w"
+    ) as f:
+
+        json.dump(
+            GRNS,
+            f,
+            indent=4
+        )
+
+    return {
+        "status": "deleted",
+        "gr_number": gr_number
+    }
 # ---------- KEFRON INVOICES ----------
 
 @app.get("/kefron/invoices")
