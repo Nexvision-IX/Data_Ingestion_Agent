@@ -678,9 +678,6 @@ elif selected_module == "Admin Data Manager":
     st.subheader(
         "Delete Single Records"
     )
-    st.subheader(
-        "Delete Single Records"
-    )
 
     delete_invoice_no = st.text_input(
         "Invoice Number",
