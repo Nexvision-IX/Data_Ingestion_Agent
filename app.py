@@ -621,189 +621,88 @@ elif selected_module == "Admin Data Manager":
     st.warning(
         "Danger Zone - Database Operations"
     )
+
     st.divider()
 
-confirm_reset = st.checkbox(
-    "I understand this will clear demo state",
-    key="confirm_reset_demo"
-)
+    # ==========================
+    # RESET DEMO
+    # ==========================
 
-if confirm_reset and st.button(
-    "Reset Demo Environment",
-    key="reset_demo_btn"
-):
+    st.subheader(
+        "Reset Demo Environment"
+    )
 
-    try:
+    confirm_reset = st.checkbox(
+        "I understand this will clear master tables and reset sync state",
+        key="confirm_reset_demo"
+    )
 
-        result = reset_demo_environment()
+    if confirm_reset:
 
-        if result.get("status") == "success":
+        if st.button(
+            "Reset Demo Environment",
+            key="reset_demo_btn"
+        ):
 
-            st.success(
-                "Demo environment reset."
-            )
+            try:
 
-            st.rerun()
+                result = reset_demo_environment()
 
-        else:
+                if result.get("status") == "success":
 
-            st.error(
-                result.get(
-                    "error",
-                    "Reset failed"
-                )
-            )
+                    st.success(
+                        "Demo environment reset."
+                    )
 
-    except Exception as e:
+                    st.rerun()
 
-        st.exception(e)
-    # ===================================
-    # DELETE SINGLE ROWS
-    # ===================================
+                else:
+
+                    st.error(
+                        result.get(
+                            "error",
+                            "Reset failed"
+                        )
+                    )
+
+            except Exception as e:
+
+                st.exception(e)
+
+    st.divider()
+
+    # ==========================
+    # DELETE SINGLE RECORDS
+    # ==========================
 
     st.subheader(
         "Delete Single Records"
     )
 
-    delete_invoice_no = st.text_input(
-        "Invoice Number",
-        key="delete_invoice"
-    )
+    # Your delete invoice code
+    # Your delete po code
+    # Your delete grn code
 
-    if st.button(
-        "Delete Invoice",
-        key="delete_invoice_btn"
-    ):
+    st.divider()
 
-        delete_invoice(
-            delete_invoice_no
-        )
-
-        st.success(
-            "Invoice deleted."
-        )
-
-    delete_po_no = st.text_input(
-        "PO Number",
-        key="delete_po"
-    )
-
-    if st.button(
-        "Delete PO",
-        key="delete_po_btn"
-    ):
-
-        delete_po(
-            delete_po_no
-        )
-
-        st.success(
-            "PO deleted."
-        )
-
-    delete_grn_no = st.text_input(
-        "GRN Number",
-        key="delete_grn"
-    )
-
-    if st.button(
-        "Delete GRN",
-        key="delete_grn_btn"
-    ):
-
-        delete_grn(
-            delete_grn_no
-        )
-
-        st.success(
-            "GRN deleted."
-        )
-
-    # ===================================
+    # ==========================
     # CLEAR TABLES
-    # ===================================
+    # ==========================
 
     st.subheader(
         "Clear Tables"
     )
 
-    col1, col2, col3 = st.columns(3)
+    # Your clear table code
 
-    with col1:
+    st.divider()
 
-        if st.button(
-            "Clear Invoice Table"
-        ):
-
-            clear_invoice_table()
-
-            st.success(
-                "Invoice table cleared."
-            )
-
-    with col2:
-
-        if st.button(
-            "Clear PO Table"
-        ):
-
-            clear_po_table()
-
-            st.success(
-                "PO table cleared."
-            )
-
-    with col3:
-
-        if st.button(
-            "Clear GRN Table"
-        ):
-
-            clear_grn_table()
-
-            st.success(
-                "GRN table cleared."
-            )
-
-    # ===================================
-    # KEEP ONLY LATEST ROWS
-    # ===================================
+    # ==========================
+    # KEEP LATEST ROWS
+    # ==========================
 
     st.subheader(
         "Keep Latest Rows"
     )
 
-    keep_count = st.number_input(
-
-        "Rows to Keep",
-
-        min_value=1,
-
-        value=10
-    )
-
-    selected_table = st.selectbox(
-
-        "Select Table",
-
-        [
-    "invoice_master",
-    "sap_po_master",
-    "sap_grn_master"
-]
-    )
-
-    if st.button(
-        "Apply Cleanup"
-    ):
-
-        keep_latest_rows(
-
-            selected_table,
-
-            keep_count
-        )
-
-        st.success(
-            "Cleanup completed."
-        )
+    # Your cleanup code
