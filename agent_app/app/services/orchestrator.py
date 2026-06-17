@@ -246,11 +246,23 @@ class APOrchestrator:
             exception_payload(exception),
             context=request.context,
         )
-        default_recipient = invoice.extraction_raw.get(
+        '''default_recipient = invoice.extraction_raw.get(
             "vendor_email",
             "",
         )
         recipient = request.recipient or default_recipient
+        should_send = (
+            request.send
+            or settings.auto_send_email
+        )'''
+        recipient = settings.ap_exception_recipient
+
+        if not recipient:
+            raise ValueError(
+                "AP_EXCEPTION_RECIPIENT is not configured. "
+                "Set it in agent_app/.env before sending emails."
+            )
+
         should_send = (
             request.send
             or settings.auto_send_email

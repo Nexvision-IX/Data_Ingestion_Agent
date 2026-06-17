@@ -46,7 +46,10 @@ class Settings:
     smtp_use_ssl: bool = _bool("SMTP_USE_SSL", False)
     smtp_dry_run: bool = _bool("SMTP_DRY_RUN", True)
     auto_send_email: bool = _bool("AUTO_SEND_EMAIL", False)
-
+    ap_exception_recipient: str = os.getenv(
+            "AP_EXCEPTION_RECIPIENT",
+            "",
+        )
     api_base_url: str = os.getenv("API_BASE_URL", "http://localhost:8000")
 
 

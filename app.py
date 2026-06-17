@@ -30,6 +30,7 @@ from pipeline_runner import process_invoice_pipeline, sync_structured_sources
 
 DB_PATH = "data/master/ap_master.db"
 API_BASE_URL = "https://data-ingestion-agent.onrender.com"
+AP_AGENT_DB_PATH = "agent_app/ap_agent.db"
 # -----------------------------------
 # INPUT DIRECTORY
 # -----------------------------------
@@ -78,6 +79,205 @@ def get_table_count(table_name):
         """
         df = pd.read_sql_query(query, conn,)
         return int(df["total"][0])
+    finally:
+        conn.close()
+
+def ap_agent_db_exists():
+    return Path(AP_AGENT_DB_PATH).exists()
+
+
+def load_ap_agent_summary():
+    if not ap_agent_db_exists():
+        return pd.DataFrame()
+
+    conn = sqlite3.connect(AP_AGENT_DB_PATH)
+
+    try:
+        query = """
+            SELECT
+                status,
+                COUNT(*) AS total
+            FROM invoices
+            GROUP BY status
+            ORDER BY total DESC
+        """
+        return pd.read_sql_query(query, conn)
+
+    finally:
+        conn.close()
+
+
+def load_ap_agent_invoices(limit=50):
+    if not ap_agent_db_exists():
+        return pd.DataFrame()
+
+    conn = sqlite3.connect(AP_AGENT_DB_PATH)
+
+    try:
+        query = """
+            SELECT
+                i.invoice_number,
+                i.vendor_name,
+                i.po_number,
+                i.currency,
+                i.total_amount,
+                i.status AS agent_status,
+                i.source,
+
+                (
+                    SELECT COUNT(*)
+                    FROM validation_results vr
+                    WHERE vr.invoice_id = i.id
+                    AND vr.passed = 0
+                ) AS failed_rule_count,
+
+                ec.category AS exception_category,
+                ec.priority AS exception_priority,
+                ec.owner_team AS exception_owner,
+                ec.status AS exception_status,
+
+                c.status AS email_status,
+                c.recipient AS email_recipient,
+                c.subject AS email_subject,
+                c.smtp_message_id,
+                c.created_at AS email_created_at,
+
+                pa.status AS posting_status,
+                pa.sap_document_number,
+                pa.message AS posting_message,
+
+                we.event_type AS latest_event,
+                we.agent_name AS latest_agent,
+                we.message AS latest_message,
+
+                i.created_at,
+                i.updated_at
+
+            FROM invoices i
+
+            LEFT JOIN exception_cases ec
+                ON ec.invoice_id = i.id
+
+            LEFT JOIN communications c
+                ON c.id = (
+                    SELECT c2.id
+                    FROM communications c2
+                    WHERE c2.invoice_id = i.id
+                    ORDER BY c2.created_at DESC
+                    LIMIT 1
+                )
+
+            LEFT JOIN posting_attempts pa
+                ON pa.id = (
+                    SELECT pa2.id
+                    FROM posting_attempts pa2
+                    WHERE pa2.invoice_id = i.id
+                    ORDER BY pa2.created_at DESC
+                    LIMIT 1
+                )
+
+            LEFT JOIN workflow_events we
+                ON we.id = (
+                    SELECT we2.id
+                    FROM workflow_events we2
+                    WHERE we2.invoice_id = i.id
+                    ORDER BY we2.created_at DESC
+                    LIMIT 1
+                )
+
+            ORDER BY i.created_at DESC
+            LIMIT ?
+        """
+
+        return pd.read_sql_query(query, conn, params=(limit,))
+
+    finally:
+        conn.close()
+
+
+def load_ap_agent_events(invoice_number):
+    if not ap_agent_db_exists():
+        return pd.DataFrame()
+
+    conn = sqlite3.connect(AP_AGENT_DB_PATH)
+
+    try:
+        query = """
+            SELECT
+                we.created_at,
+                we.event_type,
+                we.agent_name,
+                we.message
+            FROM workflow_events we
+            JOIN invoices i
+                ON i.id = we.invoice_id
+            WHERE i.invoice_number = ?
+            ORDER BY we.created_at DESC
+        """
+
+        return pd.read_sql_query(query, conn, params=(invoice_number,))
+
+    finally:
+        conn.close()
+
+
+def load_ap_agent_validation_results(invoice_number):
+    if not ap_agent_db_exists():
+        return pd.DataFrame()
+
+    conn = sqlite3.connect(AP_AGENT_DB_PATH)
+
+    try:
+        query = """
+            SELECT
+                vr.rule_code,
+                vr.rule_name,
+                vr.passed,
+                vr.severity,
+                vr.message,
+                vr.created_at
+            FROM validation_results vr
+            JOIN invoices i
+                ON i.id = vr.invoice_id
+            WHERE i.invoice_number = ?
+            ORDER BY vr.created_at DESC
+        """
+
+        return pd.read_sql_query(query, conn, params=(invoice_number,))
+
+    finally:
+        conn.close()
+
+
+def load_ap_agent_communications(invoice_number):
+    if not ap_agent_db_exists():
+        return pd.DataFrame()
+
+    conn = sqlite3.connect(AP_AGENT_DB_PATH)
+
+    try:
+        query = """
+            SELECT
+                c.created_at,
+                c.direction,
+                c.recipient,
+                c.subject,
+                c.body,
+                c.status,
+                c.smtp_message_id
+            FROM communications c
+            JOIN invoices i
+                ON i.id = c.invoice_id
+            WHERE i.invoice_number = ?
+            ORDER BY c.created_at DESC
+        """
+
+        return pd.read_sql_query(
+            query,
+            conn,
+            params=(invoice_number,),
+        )
+
     finally:
         conn.close()
 
@@ -215,10 +415,11 @@ st.markdown(
 st.sidebar.header("Platform Controls")
 selected_module = st.sidebar.radio(
     "Choose Module",
-    [
+        [
         "Dashboard",
         "Structured Data Intake (API)",
         "Invoice Processing (PDF/Image)",
+        "AP Agent Monitor",
         "Manual Data Entry (API)",
         "Admin Data Manager",
     ],
@@ -364,7 +565,238 @@ elif selected_module == "Invoice Processing (PDF/Image)":
                 except Exception as e:
                     st.exception(e)
 
+# ===================================
+# AP AGENT MONITOR
+# ===================================
 
+elif selected_module == "AP Agent Monitor":
+
+    st.header("AP Agent Processing Monitor")
+
+    st.write(
+        """
+        This view shows what happened after invoices entered the AP Agent workflow:
+        - Posted invoices
+        - Exception invoices
+        - Failed validation rules
+        - Posting attempts
+        - Agent workflow events
+        """
+    )
+
+    if not ap_agent_db_exists():
+
+        st.warning(
+            "AP Agent database not found yet. "
+            "Run invoice processing first so agent_app/ap_agent.db is created."
+        )
+
+    else:
+
+        summary_df = load_ap_agent_summary()
+
+        if summary_df.empty:
+
+            st.info(
+                "No AP Agent records found yet."
+            )
+
+        else:
+
+            st.subheader("AP Agent Status Summary")
+
+            status_counts = {
+                row["status"]: row["total"]
+                for _, row in summary_df.iterrows()
+            }
+
+            col1, col2, col3, col4 = st.columns(4)
+
+            with col1:
+                st.metric(
+                    "Posted",
+                    status_counts.get("POSTED", 0)
+                )
+
+            with col2:
+                st.metric(
+                    "Exceptions",
+                    status_counts.get("EXCEPTION_IDENTIFIED", 0)
+                )
+
+            with col3:
+                st.metric(
+                    "Extracted",
+                    status_counts.get("EXTRACTED", 0)
+                )
+
+            with col4:
+                st.metric(
+                    "Total Agent Records",
+                    int(summary_df["total"].sum())
+                )
+
+            st.dataframe(
+                summary_df,
+                use_container_width=True
+            )
+
+        st.divider()
+
+        st.subheader("AP Agent Invoice Status")
+
+        limit = st.number_input(
+            "Rows to show",
+            min_value=10,
+            max_value=500,
+            value=50,
+            step=10
+        )
+
+        agent_df = load_ap_agent_invoices(
+            limit=limit
+        )
+
+        if agent_df.empty:
+
+            st.info(
+                "No AP Agent invoice records available."
+            )
+
+        else:
+
+            agent_df.index = agent_df.index + 1
+            agent_df.index.name = "R.no"
+
+            st.dataframe(
+                agent_df,
+                use_container_width=True
+            )
+
+            st.divider()
+
+            st.subheader("Invoice Drilldown")
+
+            invoice_options = agent_df["invoice_number"].dropna().unique().tolist()
+
+            selected_invoice = st.selectbox(
+                "Select Invoice",
+                invoice_options
+            )
+
+            if selected_invoice:
+
+                st.markdown(
+                    f"### Selected Invoice: `{selected_invoice}`"
+                )
+
+                selected_row = agent_df[
+                    agent_df["invoice_number"] == selected_invoice
+                ]
+
+                st.write(
+                    selected_row
+                )
+
+                st.subheader("Validation Results")
+
+                validation_df = load_ap_agent_validation_results(
+                    selected_invoice
+                )
+
+                if validation_df.empty:
+                    st.info("No validation results found.")
+                else:
+                    st.dataframe(
+                        validation_df,
+                        use_container_width=True
+                    )
+                st.subheader("Email / Communication")
+
+                communication_df = load_ap_agent_communications(
+                    selected_invoice
+                )
+
+                if communication_df.empty:
+
+                    st.info(
+                        "No email communication created for this invoice. "
+                        "Clean posted invoices normally do not generate emails."
+                    )
+
+                else:
+
+                    latest_email = communication_df.iloc[0]
+
+                    e1, e2, e3 = st.columns(3)
+
+                    with e1:
+                        st.metric(
+                            "Email Status",
+                            latest_email.get("status", "—")
+                        )
+
+                    with e2:
+                        st.metric(
+                            "Recipient",
+                            latest_email.get("recipient", "—")
+                        )
+
+                    with e3:
+                        st.metric(
+                            "Direction",
+                            latest_email.get("direction", "—")
+                        )
+
+                    st.dataframe(
+                        communication_df[
+                            [
+                                "created_at",
+                                "direction",
+                                "recipient",
+                                "subject",
+                                "status",
+                                "smtp_message_id",
+                            ]
+                        ],
+                        use_container_width=True,
+                    )
+
+                    st.markdown("### Email Message")
+
+                    for _, communication in communication_df.iterrows():
+
+                        st.markdown(
+                            f"**{communication.get('subject', '')}**"
+                        )
+
+                        st.caption(
+                            f"To: {communication.get('recipient', 'Not configured')} "
+                            f"· Status: {communication.get('status', '')} "
+                            f"· Created: {communication.get('created_at', '')}"
+                        )
+
+                        st.code(
+                            communication.get("body", ""),
+                            language="text",
+                        )
+
+                        st.divider()
+
+                
+                st.subheader("Workflow Events")
+
+                events_df = load_ap_agent_events(
+                    selected_invoice
+                )
+
+                if events_df.empty:
+                    st.info("No workflow events found.")
+                else:
+                    st.dataframe(
+                        events_df,
+                        use_container_width=True
+                    )
 # ===================================
 # MANUAL DATA ENTRY
 # ===================================
