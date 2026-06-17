@@ -740,9 +740,12 @@ def run_ingestion():
 
     try:
 
-        invoice_data = fetch_invoice_data(
-            last_run_time
-        )
+        # -----------------------------------
+        # IMPORTANT:
+        # We no longer ingest invoices from API.
+        # invoice_master should contain uploaded invoices only.
+        # Structured API sync now pulls only PO and GRN data.
+        # -----------------------------------
 
         po_data = fetch_po_data(
             last_run_time
@@ -750,11 +753,6 @@ def run_ingestion():
 
         gr_data = fetch_gr_data(
             last_run_time
-        )
-
-        invoice_rows = invoice_data.get(
-            "data",
-            []
         )
 
         po_rows = po_data.get(
@@ -768,12 +766,6 @@ def run_ingestion():
         )
 
         with get_conn() as conn:
-
-            for row in invoice_rows:
-                upsert_invoice(
-                    conn,
-                    row
-                )
 
             for row in po_rows:
                 upsert_po(
@@ -790,8 +782,8 @@ def run_ingestion():
             conn.commit()
 
         print(
-            f"Upserted invoice rows: "
-            f"{len(invoice_rows)}"
+            "API invoice ingestion skipped. "
+            "invoice_master is reserved for uploaded invoices only."
         )
 
         print(
@@ -805,7 +797,6 @@ def run_ingestion():
         )
 
         latest_time = get_latest_modified_time(
-            invoice_data,
             po_data,
             gr_data
         )
@@ -819,54 +810,19 @@ def run_ingestion():
         else:
 
             print(
-                "No new records in any source. "
+                "No new PO/GRN records. "
                 "Watermark unchanged."
             )
 
         # -----------------------------------
-        # TRIGGER AP AGENT ONLY WHEN NEW
-        # INVOICE ROWS ARRIVED
+        # Do not trigger AP Agent from API sync.
+        # AP Agent will be triggered by uploaded invoices.
         # -----------------------------------
 
-        if len(invoice_rows) > 0:
-
-            try:
-
-                print(
-                    "\nTriggering AP Agent for new invoices..."
-                )
-
-                ap_agent_trigger_result = trigger_ap_agent_process_new(
-                    limit=max(
-                        len(invoice_rows),
-                        50
-                    )
-                )
-
-                print(
-                    "AP Agent trigger completed:"
-                )
-
-                print(
-                    ap_agent_trigger_result
-                )
-
-            except Exception as trigger_error:
-
-                print(
-                    "AP Agent trigger failed, but ingestion completed:"
-                )
-
-                print(
-                    trigger_error
-                )
-
-        else:
-
-            print(
-                "No new invoice rows. "
-                "AP Agent trigger skipped."
-            )
+        print(
+            "AP Agent trigger skipped during API sync. "
+            "AP Agent is triggered by invoice upload flow."
+        )
 
         print(
             "\nINGESTION COMPLETED SUCCESSFULLY"
@@ -874,7 +830,7 @@ def run_ingestion():
 
         return {
 
-            "invoice_count": len(invoice_rows),
+            "invoice_count": 0,
 
             "po_count": len(po_rows),
 
@@ -882,7 +838,13 @@ def run_ingestion():
 
             "ap_agent_trigger": ap_agent_trigger_result,
 
-            "status": "success"
+            "status": "success",
+
+            "message": (
+                "Structured sync completed. "
+                "Only PO and GRN data were synced from API. "
+                "Invoices are upload-only."
+            )
         }
 
     except Exception as e:
