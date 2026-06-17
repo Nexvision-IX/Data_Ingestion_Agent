@@ -11,17 +11,24 @@ import streamlit as st
 from ingestion.master_ingestion import (
 
     delete_invoice,
+    delete_posted_invoice,
     delete_po,
     delete_grn,
 
     clear_invoice_table,
+    clear_posted_invoice_table,
     clear_po_table,
     clear_grn_table,
 
     keep_latest_rows,
-    reset_demo_environment
+    reset_demo_environment,
+
+    init_db,
+    get_conn,
+    upsert_invoice,
 )
 
+from ingestion.ap_agent_trigger import trigger_ap_agent_process_new
 from pipeline_runner import process_invoice_pipeline, sync_structured_sources
 
 # -----------------------------------
@@ -308,6 +315,46 @@ def build_line_item_payload(items, qty_key="qty", amount_key="line_amount"):
     return payload_items, subtotal
 
 
+
+def save_manual_invoice_to_master(payload):
+
+    init_db()
+
+    with get_conn() as conn:
+
+        upsert_invoice(
+            conn,
+            payload
+        )
+
+        conn.commit()
+
+    try:
+
+        ap_agent_result = trigger_ap_agent_process_new(
+            limit=50
+        )
+
+        return {
+            "status": "success",
+            "invoice_number": payload.get("invoice_number"),
+            "ap_agent_trigger": ap_agent_result,
+            "ap_agent_trigger_error": None,
+        }
+
+    except Exception as trigger_error:
+
+        return {
+            "status": "success",
+            "invoice_number": payload.get("invoice_number"),
+            "ap_agent_trigger": None,
+            "ap_agent_trigger_error": str(trigger_error),
+        }
+    
+
+
+
+
 def render_line_items_editor(
     state_key,
     prefix,
@@ -403,26 +450,28 @@ st.set_page_config(page_title="AP Automation Platform", layout="wide")
 st.title("AP Automation & Data Ingestion Platform")
 
 st.markdown(
+    
     """
     Demo platform for:
-    - Structured SAP/Kefron ingestion
-    - OCR invoice extraction
-    - AI-powered invoice understanding
-    - Centralized AP repository
+    - PO / GRN reference data sync
+    - PDF / image invoice ingestion
+    - Manual invoice entry into invoice_master
+    - AP Agent validation, exception handling, and posting workflow
     """
+
 )
 
 st.sidebar.header("Platform Controls")
 selected_module = st.sidebar.radio(
     "Choose Module",
         [
-        "Dashboard",
-        "Structured Data Intake (API)",
-        "Invoice Processing (PDF/Image)",
-        "AP Agent Monitor",
-        "Manual Data Entry (API)",
-        "Admin Data Manager",
-    ],
+    "Dashboard",
+    "Reference Data Sync (PO/GRN API)",
+    "Invoice Processing (PDF/Image)",
+    "AP Agent Monitor",
+    "Test Data Setup (Manual Invoice + PO/GRN API)",
+    "Admin Data Manager",
+],
 )
 
 # ===================================
@@ -432,7 +481,7 @@ selected_module = st.sidebar.radio(
 if selected_module == "Dashboard":
     st.header("Platform Overview")
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3,col4 = st.columns(4)
 
     with col1:
         try:
@@ -451,7 +500,14 @@ if selected_module == "Dashboard":
             st.metric("GRN Records", get_table_count("sap_grn_master"))
         except Exception:
             st.metric("GRN Records", 0)
-
+    with col4:
+        try:
+            st.metric(
+                "Posted Invoices",
+                get_table_count("sap_posted_invoice_master")
+            )
+        except Exception:
+            st.metric("Posted Invoices", 0)
     st.info("System ready for processing.")
 
     st.subheader("Recent Invoices")
@@ -481,19 +537,38 @@ if selected_module == "Dashboard":
     except Exception as e:
         st.error(f"GRN table error: {e}")
 
-
+    st.subheader("Recent Posted Invoices")
+    try:
+        posted_invoice_df = load_table_data(
+            "sap_posted_invoice_master",
+            limit=10
+        )
+        posted_invoice_df.index = posted_invoice_df.index + 1
+        posted_invoice_df.index.name = "R.no"
+        st.dataframe(
+            posted_invoice_df,
+            use_container_width=True
+        )
+    except Exception as e:
+        st.error(f"Posted invoice table error: {e}")
 # ===================================
 # STRUCTURED INGESTION
 # ===================================
 
-elif selected_module == "Structured Data Intake (API)":
-    st.header("Structured Data Intake")
+elif selected_module == "Reference Data Sync (PO/GRN API)":
+    st.header("Reference Data Sync")
+
+    st.info(
+        "Invoices are no longer synced from the API. "
+        "Invoices enter through PDF/Image upload or Manual Invoice Entry. "
+        "This page syncs only PO and GRN reference data."
+    )
+
     st.write(
         """
-        Sync structured records from:
+        Sync structured reference records from:
         - SAP Purchase Orders
         - SAP GRNs
-        - Kefron Invoice APIs
         """
     )
 
@@ -509,14 +584,32 @@ elif selected_module == "Structured Data Intake (API)":
                     details = result.get("details", {})
 
                     col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("Invoices Synced", details.get("invoice_count", 0))
-                    with col2:
-                        st.metric("PO Records Synced", details.get("po_count", 0))
-                    with col3:
-                        st.metric("GRN Records Synced", details.get("grn_count", 0))
 
-                    st.info(f"Total Sync Time: {result.get('total_time_sec', 'N/A')} sec")
+                    with col1:
+                        st.metric(
+                            "API Invoices Synced",
+                            details.get("invoice_count", 0)
+                        )
+                        st.caption(
+                            "Expected value is 0. "
+                            "Invoices are upload/manual-entry only."
+                        )
+
+                    with col2:
+                        st.metric(
+                            "PO Records Synced",
+                            details.get("po_count", 0)
+                        )
+
+                    with col3:
+                        st.metric(
+                            "GRN Records Synced",
+                            details.get("grn_count", 0)
+                        )
+
+                    st.info(
+                        f"Total Sync Time: {result.get('total_time_sec', 'N/A')} sec"
+                    )
                 else:
                     st.error(
                         f"Sync Failed: {result.get('error', result.get('message', 'Unknown error'))}"
@@ -801,23 +894,29 @@ elif selected_module == "AP Agent Monitor":
 # MANUAL DATA ENTRY
 # ===================================
 
-elif selected_module == "Manual Data Entry (API)":
-    st.header("Mock Source Manager")
-    st.write(
-        """
-        Create mock SAP/Kefron records
-        directly from UI.
-        """
+elif selected_module == "Test Data Setup (Manual Invoice + PO/GRN API)":
+    st.header("Test Data Setup")
+
+    st.info(
+        "Manual invoice entry now writes directly to invoice_master "
+        "and triggers AP Agent. It does not create a source invoice API record. "
+        "PO and GRN entries still use the mock SAP API for reference data setup."
     )
 
-    tab1, tab2, tab3 = st.tabs(["Create Invoice", "Create PO", "Create GRN"])
+    tab1, tab2, tab3 = st.tabs(
+        [
+            "Create Manual Invoice",
+            "Create PO",
+            "Create GRN",
+        ]
+    )
 
     # ===================================
     # CREATE INVOICE
     # ===================================
     with tab1:
         try:
-            st.subheader("Create Mock Invoice")
+            st.subheader("Create Manual Invoice")
 
             col1, col2 = st.columns(2)
             with col1:
@@ -879,18 +978,41 @@ elif selected_module == "Manual Data Entry (API)":
                         "last_modified": datetime.now().isoformat(),
                     }
 
-                    response = requests.post(
-                        f"{API_BASE_URL}/kefron/invoices",
-                        json=payload,
-                        headers={"Authorization": "Bearer mock_kefron_token"},
-                        timeout=60,
+                    if not invoice_number:
+                        st.error("Invoice Number is required.")
+                        st.stop()
+
+                    if not po_number:
+                        st.error("Related PO Number is required.")
+                        st.stop()
+
+                    if not vendor_name:
+                        st.error("Vendor Name is required.")
+                        st.stop()
+
+                    result = save_manual_invoice_to_master(
+                        payload
                     )
 
-                    if response.status_code == 200:
-                        st.success("Invoice created successfully.")
-                        st.json(response.json())
+                    st.success(
+                        "Manual invoice saved to invoice_master."
+                    )
+
+                    st.json(result)
+
+                    if result.get("ap_agent_trigger_error"):
+                        st.warning(
+                            "Invoice was saved, but AP Agent trigger failed. "
+                            "Make sure AP Agent is running on port 8000, then trigger processing."
+                        )
+                        st.code(
+                            result.get("ap_agent_trigger_error"),
+                            language="text",
+                        )
                     else:
-                        st.error(f"Error creating invoice: {response.text}")
+                        st.success(
+                            "AP Agent trigger completed."
+                        )
                 except Exception as e:
                     st.exception(e)
         except Exception as invoice_exception:
@@ -1129,6 +1251,24 @@ elif selected_module == "Admin Data Manager":
             "Invoice deleted."
         )
 
+    delete_posted_invoice_no = st.text_input(
+        "Posted Invoice Number",
+        key="delete_posted_invoice"
+    )
+
+    if st.button(
+        "Delete Posted Invoice",
+        key="delete_posted_invoice_btn"
+    ):
+
+        delete_posted_invoice(
+            delete_posted_invoice_no
+        )
+
+        st.success(
+            "Posted invoice deleted."
+        )
+
     delete_po_no = st.text_input(
         "PO Number",
         key="delete_po"
@@ -1179,7 +1319,7 @@ elif selected_module == "Admin Data Manager":
     )
 
     # Your clear table code
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
 
     with col1:
 
@@ -1217,16 +1357,22 @@ elif selected_module == "Admin Data Manager":
                 "GRN table cleared."
             )
 
+    with col4:
 
+        if st.button(
+            "Clear Posted Invoice Table"
+        ):
+
+            clear_posted_invoice_table()
+
+            st.success(
+                "Posted invoice table cleared."
+            )
     st.divider()
 
     # ==========================
     # KEEP LATEST ROWS
     # ==========================
-
-    st.subheader(
-        "Keep Latest Rows"
-    )
 
     st.subheader(
         "Keep Latest Rows"
