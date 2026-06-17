@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+import requests
 from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
@@ -26,7 +30,16 @@ from app.services.serializers import (
     exception_payload,
     invoice_payload,
 )
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
+
+from ingestion.master_ingestion import (
+    get_conn as get_master_conn,
+    init_db as init_master_db,
+    upsert_posted_invoice,
+)
 
 class APOrchestrator:
     def __init__(self, db: Session):
@@ -423,6 +436,180 @@ class APOrchestrator:
         self.db.refresh(invoice)
         return invoice
 
+
+    def _posted_invoice_payload(
+        self,
+        invoice: Invoice,
+        sap_document_number: str | None,
+        posting_message: str | None,
+    ) -> dict:
+
+        line_items = []
+
+        for line in invoice.lines:
+
+            quantity = float(line.quantity or 0)
+            unit_price = float(line.unit_price or 0)
+            line_amount = quantity * unit_price
+
+            line_items.append(
+                {
+                    "line_no": line.line_number,
+                    "description": line.description,
+                    "qty": quantity,
+                    "unit_price": unit_price,
+                    "line_amount": line_amount,
+                    "tax_rate": line.tax_rate,
+                    "po_item": line.po_item,
+                }
+            )
+
+        return {
+            "document_type": "posted_invoice",
+            "invoice_number": invoice.invoice_number,
+            "po_number": invoice.po_number or "",
+            "vendor_name": invoice.vendor_name,
+            "invoice_date": invoice.invoice_date.isoformat(),
+            "currency": invoice.currency,
+            "document_subtotal": invoice.subtotal,
+            "tax_amount": invoice.tax_amount,
+            "vat_percent": None,
+            "document_total": invoice.total_amount,
+            "amount": invoice.total_amount,
+            "payment_status": "Posted",
+            "posting_status": "POSTED",
+            "sap_document_number": sap_document_number,
+            "posting_message": posting_message,
+            "source_system": "AP_AGENT",
+            "line_items": line_items,
+        }
+
+    def _publish_posted_invoice_to_master(
+        self,
+        payload: dict,
+    ) -> None:
+
+        init_master_db()
+
+        with get_master_conn() as conn:
+
+            upsert_posted_invoice(
+                conn,
+                payload,
+                sap_document_number=payload.get(
+                    "sap_document_number"
+                ),
+                posting_status="POSTED",
+                posting_message=payload.get(
+                    "posting_message"
+                ),
+                source_system="AP_AGENT",
+            )
+
+            conn.commit()
+
+    def _publish_posted_invoice_to_api(
+        self,
+        invoice: Invoice,
+        payload: dict,
+    ) -> None:
+
+        if not settings.posted_invoice_api_enabled:
+
+            self._event(
+                invoice,
+                "POSTED_INVOICE_API_SKIPPED",
+                "PostingService",
+                (
+                    "Posted invoice API publishing is disabled."
+                ),
+            )
+
+            return
+
+        url = (
+            settings.posted_invoice_api_base_url.rstrip("/")
+            + "/sap/posted-invoices"
+        )
+
+        response = requests.post(
+            url,
+            json=payload,
+            auth=(
+                settings.posted_invoice_api_username,
+                settings.posted_invoice_api_password,
+            ),
+            timeout=60,
+        )
+
+        response.raise_for_status()
+
+        self._event(
+            invoice,
+            "POSTED_INVOICE_API_PUBLISHED",
+            "PostingService",
+            (
+                "Posted invoice pushed to "
+                "/sap/posted-invoices API."
+            ),
+            {
+                "api_url": url,
+                "response_status": response.status_code,
+            },
+        )
+
+    def _publish_posted_invoice(
+        self,
+        invoice: Invoice,
+        sap_document_number: str | None,
+        posting_message: str | None,
+    ) -> None:
+
+        payload = self._posted_invoice_payload(
+            invoice,
+            sap_document_number,
+            posting_message,
+        )
+
+        self._publish_posted_invoice_to_master(
+            payload
+        )
+
+        self._event(
+            invoice,
+            "POSTED_INVOICE_MASTER_PUBLISHED",
+            "PostingService",
+            (
+                "Posted invoice copied to "
+                "sap_posted_invoice_master."
+            ),
+            {
+                "sap_document_number": sap_document_number,
+            },
+        )
+
+        try:
+
+            self._publish_posted_invoice_to_api(
+                invoice,
+                payload,
+            )
+
+        except Exception as api_error:
+
+            self._event(
+                invoice,
+                "POSTED_INVOICE_API_FAILED",
+                "PostingService",
+                (
+                    "Posted invoice saved locally, but API push failed."
+                ),
+                {
+                    "error": str(api_error),
+                },
+            )
+
+
     def _post(
         self,
         invoice: Invoice,
@@ -486,3 +673,10 @@ class APOrchestrator:
                 )
             },
         )
+        if result["success"]:
+
+            self._publish_posted_invoice(
+                invoice,
+                result.get("sap_document_number"),
+                result.get("message"),
+            )

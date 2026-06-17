@@ -50,7 +50,30 @@ class Settings:
             "AP_EXCEPTION_RECIPIENT",
             "",
         )
-    api_base_url: str = os.getenv("API_BASE_URL", "http://localhost:8000")
+    api_base_url: str = os.getenv(
+    "API_BASE_URL",
+    "http://localhost:8000",
+    )
+
+    posted_invoice_api_enabled: bool = _bool(
+        "POSTED_INVOICE_API_ENABLED",
+        True,
+    )
+
+    posted_invoice_api_base_url: str = os.getenv(
+        "POSTED_INVOICE_API_BASE_URL",
+        "https://data-ingestion-agent.onrender.com",
+    )
+
+    posted_invoice_api_username: str = os.getenv(
+        "POSTED_INVOICE_API_USERNAME",
+        "sap_user",
+    )
+
+    posted_invoice_api_password: str = os.getenv(
+        "POSTED_INVOICE_API_PASSWORD",
+        "sap_pass",
+    )
 
 
 settings = Settings()
