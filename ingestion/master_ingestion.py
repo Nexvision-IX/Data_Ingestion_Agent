@@ -5,6 +5,7 @@ from pathlib import Path
 
 from ingestion.clients.sap_client import SAPClient
 from ingestion.clients.kefron_client import KefronClient
+from ingestion.ap_agent_trigger import trigger_ap_agent_process_new
 
 # -----------------------------------
 # PATHS
@@ -190,6 +191,7 @@ def get_last_run_time():
 
         return None
 
+
 def update_last_run_time(new_time):
 
     with open(
@@ -213,6 +215,8 @@ def update_last_run_time(new_time):
         f"Updated watermark -> "
         f"{new_time}"
     )
+
+
 def get_latest_modified_time(*datasets):
 
     latest_dt = None
@@ -297,6 +301,7 @@ def fetch_invoice_data(since_date):
 
     return data
 
+
 def fetch_po_data(since_date):
 
     print(
@@ -319,6 +324,7 @@ def fetch_po_data(since_date):
     )
 
     return data
+
 
 def fetch_gr_data(since_date):
 
@@ -426,9 +432,12 @@ def upsert_invoice(conn, row):
         now
     ))
 
+
 def upsert_po(conn, row):
 
-    now = datetime.now().isoformat(timespec="seconds")
+    now = datetime.now().isoformat(
+        timespec="seconds"
+    )
 
     conn.execute("""
 
@@ -489,7 +498,9 @@ def upsert_po(conn, row):
 
         row.get("po_status"),
 
-        json.dumps(row.get("line_items", [])),
+        json.dumps(
+            row.get("line_items", [])
+        ),
 
         json.dumps(row),
 
@@ -498,9 +509,12 @@ def upsert_po(conn, row):
         now
     ))
 
+
 def upsert_gr(conn, row):
 
-    now = datetime.now().isoformat(timespec="seconds")
+    now = datetime.now().isoformat(
+        timespec="seconds"
+    )
 
     conn.execute("""
 
@@ -558,7 +572,9 @@ def upsert_gr(conn, row):
 
         row.get("gr_status"),
 
-        json.dumps(row.get("line_items", [])),
+        json.dumps(
+            row.get("line_items", [])
+        ),
 
         json.dumps(row),
 
@@ -577,32 +593,60 @@ def run_ingestion():
 
     last_run_time = get_last_run_time()
 
-    print(f"\nLast Watermark: {last_run_time}")
+    print(
+        f"\nLast Watermark: {last_run_time}"
+    )
+
+    ap_agent_trigger_result = None
 
     try:
 
-        invoice_data = fetch_invoice_data(last_run_time)
+        invoice_data = fetch_invoice_data(
+            last_run_time
+        )
 
-        po_data = fetch_po_data(last_run_time)
+        po_data = fetch_po_data(
+            last_run_time
+        )
 
-        gr_data = fetch_gr_data(last_run_time)
+        gr_data = fetch_gr_data(
+            last_run_time
+        )
 
-        invoice_rows = invoice_data.get("data", [])
+        invoice_rows = invoice_data.get(
+            "data",
+            []
+        )
 
-        po_rows = po_data.get("data", [])
+        po_rows = po_data.get(
+            "data",
+            []
+        )
 
-        gr_rows = gr_data.get("data", [])
+        gr_rows = gr_data.get(
+            "data",
+            []
+        )
 
         with get_conn() as conn:
 
             for row in invoice_rows:
-                upsert_invoice(conn, row)
+                upsert_invoice(
+                    conn,
+                    row
+                )
 
             for row in po_rows:
-                upsert_po(conn, row)
+                upsert_po(
+                    conn,
+                    row
+                )
 
             for row in gr_rows:
-                upsert_gr(conn, row)
+                upsert_gr(
+                    conn,
+                    row
+                )
 
             conn.commit()
 
@@ -640,6 +684,51 @@ def run_ingestion():
                 "Watermark unchanged."
             )
 
+        # -----------------------------------
+        # TRIGGER AP AGENT ONLY WHEN NEW
+        # INVOICE ROWS ARRIVED
+        # -----------------------------------
+
+        if len(invoice_rows) > 0:
+
+            try:
+
+                print(
+                    "\nTriggering AP Agent for new invoices..."
+                )
+
+                ap_agent_trigger_result = trigger_ap_agent_process_new(
+                    limit=max(
+                        len(invoice_rows),
+                        50
+                    )
+                )
+
+                print(
+                    "AP Agent trigger completed:"
+                )
+
+                print(
+                    ap_agent_trigger_result
+                )
+
+            except Exception as trigger_error:
+
+                print(
+                    "AP Agent trigger failed, but ingestion completed:"
+                )
+
+                print(
+                    trigger_error
+                )
+
+        else:
+
+            print(
+                "No new invoice rows. "
+                "AP Agent trigger skipped."
+            )
+
         print(
             "\nINGESTION COMPLETED SUCCESSFULLY"
         )
@@ -651,6 +740,8 @@ def run_ingestion():
             "po_count": len(po_rows),
 
             "grn_count": len(gr_rows),
+
+            "ap_agent_trigger": ap_agent_trigger_result,
 
             "status": "success"
         }
@@ -673,8 +764,12 @@ def run_ingestion():
 # -----------------------------------
 
 if __name__ == "__main__":
+
     run_ingestion()
 
+# -----------------------------------
+# DEMO / MAINTENANCE HELPERS
+# -----------------------------------
 
 def delete_invoice(invoice_number):
 
@@ -724,7 +819,7 @@ def delete_grn(grn_number):
 
             """
             DELETE FROM sap_grn_master
-            WHERE grn_number = ?
+            WHERE gr_number = ?
             """,
 
             (grn_number,)
@@ -804,6 +899,8 @@ def keep_latest_rows(
         )
 
         conn.commit()
+
+
 def reset_demo_environment():
 
     # reset watermark

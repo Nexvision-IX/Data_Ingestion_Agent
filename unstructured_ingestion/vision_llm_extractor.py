@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from groq import Groq
 
 from ingestion.master_ingestion import get_conn, init_db, upsert_invoice
-
+from ingestion.ap_agent_trigger import trigger_ap_agent_process_new
 # =========================================================
 # ENV
 # =========================================================
@@ -442,8 +442,31 @@ def process_text_file(
                 with get_conn() as conn:
                     upsert_invoice(conn, parsed_json)
                     conn.commit()
+
                 parsed_json["db_inserted"] = True
                 print("Inserted into invoice_master")
+
+                try:
+                    print("Triggering AP Agent for uploaded invoice...")
+
+                    ap_agent_result = trigger_ap_agent_process_new(
+                        limit=50
+                    )
+
+                    parsed_json["ap_agent_trigger"] = ap_agent_result
+
+                    print("AP Agent trigger completed:")
+                    print(ap_agent_result)
+
+                except Exception as trigger_error:
+                    parsed_json["ap_agent_trigger_error"] = str(trigger_error)
+
+                    print(
+                        "AP Agent trigger failed, "
+                        "but invoice was inserted into invoice_master"
+                    )
+                    print(trigger_error)
+
             else:
                 parsed_json["db_insert_error"] = "Missing invoice number"
                 print("DB insert skipped — missing invoice number")

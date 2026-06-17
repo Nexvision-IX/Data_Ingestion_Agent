@@ -50,3 +50,57 @@ data/master/ap_master.db
 
 # Mock backups
 mock_data/*.bak
+
+# -------------------------------------------------
+# Local test / backup files
+# -------------------------------------------------
+check_master_db.py
+*_backup.py
+
+# -------------------------------------------------
+# Environment files
+# -------------------------------------------------
+.env
+**/.env
+.streamlit/secrets.toml
+
+# -------------------------------------------------
+# Local databases / runtime state
+# -------------------------------------------------
+*.db
+*.sqlite
+*.sqlite3
+data/master/ap_master.db
+agent_app/*.db
+state/
+agent_app/state/
+
+# -------------------------------------------------
+# Python cache / virtual env
+# -------------------------------------------------
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# -------------------------------------------------
+# OCR / upload / generated outputs
+# -------------------------------------------------
+unstructured_ingestion/unstructured_inputs/
+unstructured_ingestion/extracted_text/
+unstructured_ingestion/extracted_json/
+unstructured_ingestion/structured_debug/
+ocr_output/
+temp/
+*.log
+
+# -------------------------------------------------
+# OS / editor files
+# -------------------------------------------------
+.vscode/
+.ipynb_checkpoints/
+.DS_Store
+Thumbs.db
+*.pid

@@ -1,0 +1,115 @@
+{
+  "vendors": [
+    {
+      "vendor_number": "V100",
+      "vendor_name": "Acme Industrial Supplies",
+      "status": "ACTIVE",
+      "email": "supplier.acme@example.com",
+      "payment_terms": "NET30"
+    },
+    {
+      "vendor_number": "V200",
+      "vendor_name": "Blocked Demo Vendor",
+      "status": "BLOCKED",
+      "email": "blocked.vendor@example.com",
+      "payment_terms": "NET30"
+    }
+  ],
+  "purchase_orders": [
+    {
+      "po_number": "4500000010",
+      "vendor_number": "V100",
+      "company_code": "1000",
+      "currency": "INR",
+      "payment_terms": "NET30",
+      "status": "OPEN",
+      "items": [
+        {
+          "po_item": "00010",
+          "description": "Industrial component",
+          "ordered_quantity": 10,
+          "unit_price": 1000
+        }
+      ]
+    },
+    {
+      "po_number": "4500000020",
+      "vendor_number": "V100",
+      "company_code": "1000",
+      "currency": "INR",
+      "payment_terms": "NET30",
+      "status": "OPEN",
+      "items": [
+        {
+          "po_item": "00010",
+          "description": "Maintenance service",
+          "ordered_quantity": 5,
+          "unit_price": 500
+        }
+      ]
+    },
+    {
+      "po_number": "4500000030",
+      "vendor_number": "V100",
+      "company_code": "1000",
+      "currency": "INR",
+      "payment_terms": "NET30",
+      "status": "OPEN",
+      "items": [
+        {
+          "po_item": "00010",
+          "description": "Calibration unit",
+          "ordered_quantity": 2,
+          "unit_price": 700
+        }
+      ]
+    },
+    {
+      "po_number": "4500000040",
+      "vendor_number": "V200",
+      "company_code": "1000",
+      "currency": "INR",
+      "payment_terms": "NET30",
+      "status": "OPEN",
+      "items": [
+        {
+          "po_item": "00010",
+          "description": "Demo material",
+          "ordered_quantity": 1,
+          "unit_price": 1000
+        }
+      ]
+    }
+  ],
+  "grns": [
+    {
+      "grn_number": "5000000001",
+      "po_number": "4500000010",
+      "po_item": "00010",
+      "received_quantity": 10,
+      "status": "POSTED"
+    },
+    {
+      "grn_number": "5000000002",
+      "po_number": "4500000030",
+      "po_item": "00010",
+      "received_quantity": 2,
+      "status": "POSTED"
+    },
+    {
+      "grn_number": "5000000003",
+      "po_number": "4500000040",
+      "po_item": "00010",
+      "received_quantity": 1,
+      "status": "POSTED"
+    }
+  ],
+  "invoice_history": [
+    {
+      "vendor_number": "V100",
+      "invoice_number": "INV-DUP-001",
+      "amount": 11800,
+      "sap_document_number": "5100000001"
+    }
+  ]
+}
