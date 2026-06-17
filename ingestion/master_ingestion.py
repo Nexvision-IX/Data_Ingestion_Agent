@@ -157,7 +157,48 @@ def init_db():
             )
 
         """)
+        conn.execute("""
 
+            CREATE TABLE IF NOT EXISTS sap_posted_invoice_master (
+
+                invoice_number TEXT PRIMARY KEY,
+
+                po_number TEXT,
+
+                vendor_name TEXT,
+
+                invoice_date TEXT,
+
+                currency TEXT,
+
+                document_subtotal REAL,
+
+                tax_amount REAL,
+
+                vat_percent REAL,
+
+                document_total REAL,
+
+                payment_status TEXT,
+
+                items_json TEXT,
+
+                raw_json TEXT,
+
+                sap_document_number TEXT,
+
+                posting_status TEXT,
+
+                posting_message TEXT,
+
+                source_system TEXT,
+
+                posted_at TEXT,
+
+                updated_at TEXT
+            )
+
+        """)
 # -----------------------------------
 # WATERMARK / CHECKPOINT
 # -----------------------------------
@@ -432,7 +473,105 @@ def upsert_invoice(conn, row):
         now
     ))
 
+def upsert_posted_invoice(
+    conn,
+    row,
+    sap_document_number=None,
+    posting_status="POSTED",
+    posting_message=None,
+    source_system="AP_AGENT",
+):
 
+    now = datetime.now().isoformat(
+        timespec="seconds"
+    )
+
+    conn.execute("""
+
+        INSERT INTO sap_posted_invoice_master (
+
+            invoice_number,
+            po_number,
+            vendor_name,
+            invoice_date,
+            currency,
+
+            document_subtotal,
+            tax_amount,
+            vat_percent,
+            document_total,
+
+            payment_status,
+
+            items_json,
+            raw_json,
+
+            sap_document_number,
+            posting_status,
+            posting_message,
+            source_system,
+
+            posted_at,
+            updated_at
+
+        )
+
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+
+        ON CONFLICT(invoice_number) DO UPDATE SET
+
+            po_number=excluded.po_number,
+            vendor_name=excluded.vendor_name,
+            invoice_date=excluded.invoice_date,
+            currency=excluded.currency,
+
+            document_subtotal=excluded.document_subtotal,
+            tax_amount=excluded.tax_amount,
+            vat_percent=excluded.vat_percent,
+            document_total=excluded.document_total,
+
+            payment_status=excluded.payment_status,
+
+            items_json=excluded.items_json,
+            raw_json=excluded.raw_json,
+
+            sap_document_number=excluded.sap_document_number,
+            posting_status=excluded.posting_status,
+            posting_message=excluded.posting_message,
+            source_system=excluded.source_system,
+
+            posted_at=excluded.posted_at,
+            updated_at=excluded.updated_at
+
+    """, (
+
+        row.get("invoice_number"),
+        row.get("po_number"),
+        row.get("vendor_name"),
+        row.get("invoice_date"),
+        row.get("currency"),
+
+        row.get("document_subtotal"),
+        row.get("tax_amount"),
+        row.get("vat_percent"),
+        row.get("document_total"),
+
+        row.get("payment_status"),
+
+        json.dumps(
+            row.get("line_items", [])
+        ),
+
+        json.dumps(row),
+
+        sap_document_number,
+        posting_status,
+        posting_message,
+        source_system,
+
+        now,
+        now
+    ))
 def upsert_po(conn, row):
 
     now = datetime.now().isoformat(
@@ -790,6 +929,25 @@ def delete_invoice(invoice_number):
         conn.commit()
 
 
+def delete_posted_invoice(invoice_number):
+
+    with get_conn() as conn:
+
+        cursor = conn.cursor()
+
+        cursor.execute(
+
+            """
+            DELETE FROM sap_posted_invoice_master
+            WHERE invoice_number = ?
+            """,
+
+            (invoice_number,)
+        )
+
+        conn.commit()
+
+
 def delete_po(po_number):
 
     with get_conn() as conn:
@@ -866,7 +1024,17 @@ def clear_grn_table():
 
         conn.commit()
 
+def clear_posted_invoice_table():
 
+    with get_conn() as conn:
+
+        cursor = conn.cursor()
+
+        cursor.execute(
+            "DELETE FROM sap_posted_invoice_master"
+        )
+
+        conn.commit()
 def keep_latest_rows(
     table_name,
     keep_count=10
@@ -902,7 +1070,7 @@ def keep_latest_rows(
 
 
 def reset_demo_environment():
-
+    init_db()
     # reset watermark
     with open(
         STATE_FILE,
@@ -930,7 +1098,9 @@ def reset_demo_environment():
         conn.execute(
             "DELETE FROM sap_grn_master"
         )
-
+        conn.execute(
+            "DELETE FROM sap_posted_invoice_master"
+        )
         conn.commit()
 
     return {
