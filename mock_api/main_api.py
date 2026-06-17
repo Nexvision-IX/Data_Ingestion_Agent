@@ -24,6 +24,7 @@ MOCK_DATA_DIR.mkdir(parents=True, exist_ok=True)
 INVOICE_JSON_PATH = MOCK_DATA_DIR / "invoices.json"
 PO_JSON_PATH = MOCK_DATA_DIR / "pos.json"
 GRN_JSON_PATH = MOCK_DATA_DIR / "grns.json"
+POSTED_INVOICE_JSON_PATH = MOCK_DATA_DIR / "posted_invoices.json"
 
 
 # ---------------------------
@@ -148,6 +149,31 @@ class InvoiceRequest(BaseModel):
     line_items: List[LineItem] = Field(default_factory=list)
     last_modified: Optional[str] = None
 
+class PostedInvoiceRequest(BaseModel):
+    document_type: str = "posted_invoice"
+    invoice_number: str
+    po_number: str
+    vendor_name: str
+    invoice_date: str
+    currency: str
+
+    document_subtotal: float
+    tax_amount: float
+    vat_percent: Optional[float] = None
+    document_total: float
+    amount: Optional[float] = None
+
+    payment_status: str = "Posted"
+    posting_status: str = "POSTED"
+    sap_document_number: Optional[str] = None
+    posting_message: Optional[str] = None
+    source_system: str = "AP_AGENT"
+
+    line_items: List[LineItem] = Field(default_factory=list)
+
+    posted_at: Optional[str] = None
+    last_modified: Optional[str] = None
+
 
 class PORequest(BaseModel):
     document_type: str = "po"
@@ -191,6 +217,7 @@ class GRNRequest(BaseModel):
 INVOICES = load_json_list(INVOICE_JSON_PATH)
 POS = load_json_list(PO_JSON_PATH)
 GRNS = load_json_list(GRN_JSON_PATH)
+POSTED_INVOICES = load_json_list(POSTED_INVOICE_JSON_PATH)
 
 
 # ---------------------------
@@ -284,6 +311,7 @@ def delete_po(po_number: str):
 
 
 @app.delete("/sap/gr/{gr_number}")
+@app.delete("/sap/grn/{gr_number}")
 def delete_grn(gr_number: str):
 
     global GRNS
@@ -318,18 +346,61 @@ def delete_grn(gr_number: str):
         "status": "deleted",
         "gr_number": gr_number
     }
+#------------DELETE POSTED INVOICE ----------
+
+@app.delete("/sap/posted-invoices/{invoice_number}")
+def delete_posted_invoice(
+    invoice_number: str,
+    auth=Depends(verify_sap),
+):
+
+    global POSTED_INVOICES
+
+    original_count = len(POSTED_INVOICES)
+
+    POSTED_INVOICES = [
+        row
+        for row in POSTED_INVOICES
+        if row.get("invoice_number") != invoice_number
+    ]
+
+    if len(POSTED_INVOICES) == original_count:
+
+        return {
+            "status": "not_found",
+            "invoice_number": invoice_number
+        }
+
+    save_json_file(
+        POSTED_INVOICE_JSON_PATH,
+        POSTED_INVOICES
+    )
+
+    return {
+        "status": "deleted",
+        "invoice_number": invoice_number
+    }
 # ---------- KEFRON INVOICES ----------
+
+# ---------- LEGACY KEFRON INVOICES ----------
+# Disabled for final demo flow.
+# Invoices now enter through upload/manual entry into invoice_master.
+# API should contain only successfully posted invoices.
 
 @app.get("/kefron/invoices")
 def get_invoices(
     since_date: Optional[str] = Query(None),
     auth=Depends(verify_kefron),
 ):
-    filtered = filter_by_since(INVOICES, since_date)
     return {
-        "source": "kefron",
-        "count": len(filtered),
-        "data": filtered,
+        "source": "kefron_legacy_disabled",
+        "count": 0,
+        "data": [],
+        "message": (
+            "Source invoice API is disabled. "
+            "Invoices now enter through upload/manual entry. "
+            "Use /sap/posted-invoices for successfully posted invoices."
+        ),
     }
 
 
@@ -338,21 +409,81 @@ def create_invoice(
     payload: InvoiceRequest,
     auth=Depends(verify_kefron),
 ):
-    new_invoice = payload.dict()
-    new_invoice["invoice_id"] = str(uuid.uuid4())
-    new_invoice["amount"] = new_invoice.get("amount") or new_invoice["document_total"]
-    new_invoice["last_modified"] = normalize_dt(new_invoice.get("last_modified"))
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "Source invoice API is disabled. "
+            "Invoices must enter through upload/manual entry. "
+            "Only posted invoices should be pushed to /sap/posted-invoices."
+        ),
+    )
 
-    INVOICES.append(new_invoice)
-    save_json_file(INVOICE_JSON_PATH, INVOICES)
+
+# ---------- SAP PO ----------
+
+# ---------- SAP POSTED INVOICES ----------
+
+@app.get("/sap/posted-invoices")
+def get_posted_invoices(
+    since_date: Optional[str] = Query(None),
+    auth=Depends(verify_sap),
+):
+    filtered = filter_by_since(
+        POSTED_INVOICES,
+        since_date
+    )
+
+    return {
+        "source": "sap_posted_invoices",
+        "count": len(filtered),
+        "data": filtered,
+    }
+
+
+@app.post("/sap/posted-invoices")
+def create_posted_invoice(
+    payload: PostedInvoiceRequest,
+    auth=Depends(verify_sap),
+):
+    global POSTED_INVOICES
+
+    new_invoice = payload.dict()
+
+    new_invoice["posted_invoice_id"] = str(uuid.uuid4())
+
+    new_invoice["amount"] = (
+        new_invoice.get("amount")
+        or new_invoice["document_total"]
+    )
+
+    new_invoice["posted_at"] = normalize_dt(
+        new_invoice.get("posted_at")
+    )
+
+    new_invoice["last_modified"] = normalize_dt(
+        new_invoice.get("last_modified")
+    )
+
+    # upsert by invoice_number
+    POSTED_INVOICES = [
+        row
+        for row in POSTED_INVOICES
+        if row.get("invoice_number") != new_invoice["invoice_number"]
+    ]
+
+    POSTED_INVOICES.append(
+        new_invoice
+    )
+
+    save_json_file(
+        POSTED_INVOICE_JSON_PATH,
+        POSTED_INVOICES
+    )
 
     return {
         "status": "success",
         "record": new_invoice,
     }
-
-
-# ---------- SAP PO ----------
 
 @app.get("/sap/po")
 def get_pos(
