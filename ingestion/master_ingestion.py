@@ -11,11 +11,11 @@ from ingestion.ap_agent_trigger import trigger_ap_agent_process_new
 # PATHS
 # -----------------------------------
 
-STATE_FILE = Path("state/last_run.json")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-MASTER_DB_PATH = Path(
-    "data/master/ap_master.db"
-)
+STATE_FILE = PROJECT_ROOT / "state" / "last_run.json"
+
+MASTER_DB_PATH = PROJECT_ROOT / "data" / "master" / "ap_master.db"
 
 STATE_FILE.parent.mkdir(
     parents=True,
@@ -26,7 +26,6 @@ MASTER_DB_PATH.parent.mkdir(
     parents=True,
     exist_ok=True
 )
-
 # -----------------------------------
 # CREATE CLIENTS
 # -----------------------------------
