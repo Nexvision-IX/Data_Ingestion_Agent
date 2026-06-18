@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -30,6 +31,7 @@ from app.services.serializers import (
     exception_payload,
     invoice_payload,
 )
+
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 if str(PROJECT_ROOT) not in sys.path:
@@ -40,6 +42,7 @@ from ingestion.master_ingestion import (
     init_db as init_master_db,
     upsert_posted_invoice,
 )
+
 
 class APOrchestrator:
     def __init__(self, db: Session):
@@ -105,6 +108,7 @@ class APOrchestrator:
             invoice,
             context,
         )
+
         for result in results:
             self.db.add(
                 ValidationResult(
@@ -148,13 +152,16 @@ class APOrchestrator:
                     "controls."
                 ),
             )
+
             if settings.auto_post_clean_invoices:
                 self._post(invoice, context)
+
         else:
             self._handle_exception(invoice, results)
 
         self.db.commit()
         self.db.refresh(invoice)
+
         return invoice
 
     def _handle_exception(
@@ -168,10 +175,12 @@ class APOrchestrator:
             if not result.passed
             and result.severity == "ERROR"
         ]
+
         classification = self.classifier.classify(
             invoice_payload(invoice),
             failed,
         )
+
         resolution = self.resolver.recommend(
             classification.category
         )
@@ -197,6 +206,7 @@ class APOrchestrator:
             existing_open.owner_team = classification.owner_team
             existing_open.resolution_strategy = resolution
             exception = existing_open
+
         else:
             exception = ExceptionCase(
                 invoice_id=invoice.id,
@@ -216,6 +226,7 @@ class APOrchestrator:
             self.db.flush()
 
         invoice.status = "EXCEPTION_IDENTIFIED"
+
         self._event(
             invoice,
             "EXCEPTION_CLASSIFIED",
@@ -226,6 +237,7 @@ class APOrchestrator:
             ),
             classification.model_dump(),
         )
+
         self._event(
             invoice,
             "RESOLUTION_RECOMMENDED",
@@ -239,6 +251,7 @@ class APOrchestrator:
             and communication.status in {"DRAFTED", "SENT"}
             for communication in invoice.communications
         )
+
         if not has_draft:
             self.create_communication(
                 exception,
@@ -246,6 +259,7 @@ class APOrchestrator:
                     send=settings.auto_send_email
                 ),
             )
+
         return exception
 
     def create_communication(
@@ -254,11 +268,13 @@ class APOrchestrator:
         request: CommunicationRequest,
     ) -> Communication:
         invoice = exception.invoice
+
         draft = self.communicator.draft(
             invoice_payload(invoice),
             exception_payload(exception),
             context=request.context,
         )
+
         '''default_recipient = invoice.extraction_raw.get(
             "vendor_email",
             "",
@@ -268,6 +284,7 @@ class APOrchestrator:
             request.send
             or settings.auto_send_email
         )'''
+
         recipient = settings.ap_exception_recipient
 
         if not recipient:
@@ -304,7 +321,9 @@ class APOrchestrator:
             status=delivery["status"],
             smtp_message_id=delivery.get("message_id"),
         )
+
         self.db.add(communication)
+
         self._event(
             invoice,
             "COMMUNICATION_CREATED",
@@ -316,8 +335,10 @@ class APOrchestrator:
                 "delivery_status": delivery["status"],
             },
         )
+
         self.db.commit()
         self.db.refresh(communication)
+
         return communication
 
     def recheck(
@@ -333,6 +354,7 @@ class APOrchestrator:
             ),
             None,
         )
+
         if not exception:
             raise ValueError(
                 "Invoice has no open exception to recheck"
@@ -345,6 +367,7 @@ class APOrchestrator:
                 invoice,
                 exception.category,
             )
+
             self._event(
                 invoice,
                 "MOCK_RESOLUTION_APPLIED",
@@ -356,10 +379,12 @@ class APOrchestrator:
             )
 
         context = self.sap.get_invoice_context(invoice)
+
         current_results = self.validator.validate(
             invoice,
             context,
         )
+
         decision = self.rechecker.decide(
             {
                 "invoice": invoice_payload(invoice),
@@ -374,7 +399,9 @@ class APOrchestrator:
                 ],
             }
         )
+
         exception.last_recheck_decision = decision.decision
+
         self._event(
             invoice,
             "RECHECK_DECISION",
@@ -386,9 +413,12 @@ class APOrchestrator:
         if decision.decision == "REVALIDATE":
             invoice.status = "RECHECK_PENDING"
             self.db.commit()
+
             invoice = self.process(invoice)
+
             if invoice.status == "POSTED":
                 exception.status = "RESOLVED"
+
                 self._event(
                     invoice,
                     "EXCEPTION_RESOLVED",
@@ -401,6 +431,7 @@ class APOrchestrator:
 
         elif decision.decision == "WAIT":
             invoice.status = "WAITING_FOR_RESPONSE"
+
             self.create_communication(
                 exception,
                 CommunicationRequest(
@@ -415,6 +446,7 @@ class APOrchestrator:
         elif decision.decision == "ESCALATE":
             invoice.status = "ESCALATED"
             exception.status = "ESCALATED"
+
             self._event(
                 invoice,
                 "EXCEPTION_ESCALATED",
@@ -425,6 +457,7 @@ class APOrchestrator:
         elif decision.decision == "CLOSE":
             invoice.status = "CLOSED"
             exception.status = "CLOSED"
+
             self._event(
                 invoice,
                 "INVOICE_CLOSED",
@@ -434,8 +467,8 @@ class APOrchestrator:
 
         self.db.commit()
         self.db.refresh(invoice)
-        return invoice
 
+        return invoice
 
     def _posted_invoice_payload(
         self,
@@ -443,11 +476,43 @@ class APOrchestrator:
         sap_document_number: str | None,
         posting_message: str | None,
     ) -> dict:
+        raw_payload = invoice.extraction_raw or {}
+
+        if isinstance(raw_payload, str):
+            try:
+                raw_payload = json.loads(raw_payload)
+            except Exception:
+                raw_payload = {}
+
+        raw_json = {}
+
+        if isinstance(raw_payload, dict):
+            raw_json = raw_payload.get("raw_json") or {}
+
+        vat_percent = None
+
+        if isinstance(raw_payload, dict):
+            vat_percent = raw_payload.get("vat_percent")
+
+        if vat_percent is None and isinstance(raw_json, dict):
+            vat_percent = raw_json.get("vat_percent")
+
+        if vat_percent is None and invoice.subtotal:
+            try:
+                vat_percent = round(
+                    (
+                        float(invoice.tax_amount or 0)
+                        / float(invoice.subtotal)
+                    )
+                    * 100,
+                    2,
+                )
+            except Exception:
+                vat_percent = None
 
         line_items = []
 
         for line in invoice.lines:
-
             quantity = float(line.quantity or 0)
             unit_price = float(line.unit_price or 0)
             line_amount = quantity * unit_price
@@ -473,7 +538,7 @@ class APOrchestrator:
             "currency": invoice.currency,
             "document_subtotal": invoice.subtotal,
             "tax_amount": invoice.tax_amount,
-            "vat_percent": None,
+            "vat_percent": vat_percent,
             "document_total": invoice.total_amount,
             "amount": invoice.total_amount,
             "payment_status": "Posted",
@@ -488,11 +553,9 @@ class APOrchestrator:
         self,
         payload: dict,
     ) -> None:
-
         init_master_db()
 
         with get_master_conn() as conn:
-
             upsert_posted_invoice(
                 conn,
                 payload,
@@ -513,9 +576,7 @@ class APOrchestrator:
         invoice: Invoice,
         payload: dict,
     ) -> None:
-
         if not settings.posted_invoice_api_enabled:
-
             self._event(
                 invoice,
                 "POSTED_INVOICE_API_SKIPPED",
@@ -564,7 +625,6 @@ class APOrchestrator:
         sap_document_number: str | None,
         posting_message: str | None,
     ) -> None:
-
         payload = self._posted_invoice_payload(
             invoice,
             sap_document_number,
@@ -589,14 +649,12 @@ class APOrchestrator:
         )
 
         try:
-
             self._publish_posted_invoice_to_api(
                 invoice,
                 payload,
             )
 
         except Exception as api_error:
-
             self._event(
                 invoice,
                 "POSTED_INVOICE_API_FAILED",
@@ -609,15 +667,16 @@ class APOrchestrator:
                 },
             )
 
-
     def _post(
         self,
         invoice: Invoice,
         context: dict,
     ) -> None:
         live_check = self.sap.pre_post_check(invoice)
+
         if not live_check.get("ok"):
             invoice.status = "POSTING_FAILED"
+
             attempt = PostingAttempt(
                 invoice_id=invoice.id,
                 status="FAILED",
@@ -626,20 +685,25 @@ class APOrchestrator:
                     "Pre-post check failed.",
                 ),
             )
+
             self.db.add(attempt)
+
             self._event(
                 invoice,
                 "POSTING_FAILED",
                 "PostingService",
                 attempt.message,
             )
+
             return
 
         invoice.status = "POSTING_IN_PROGRESS"
+
         result = self.posting.post_invoice(
             invoice,
             live_check["context"],
         )
+
         attempt = PostingAttempt(
             invoice_id=invoice.id,
             status=(
@@ -652,12 +716,15 @@ class APOrchestrator:
             ),
             message=result["message"],
         )
+
         self.db.add(attempt)
+
         invoice.status = (
             "POSTED"
             if result["success"]
             else "POSTING_FAILED"
         )
+
         self._event(
             invoice,
             (
@@ -673,8 +740,8 @@ class APOrchestrator:
                 )
             },
         )
-        if result["success"]:
 
+        if result["success"]:
             self._publish_posted_invoice(
                 invoice,
                 result.get("sap_document_number"),
