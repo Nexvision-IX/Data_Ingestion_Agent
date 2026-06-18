@@ -1,5 +1,4 @@
 ﻿from app.db import Base, engine
-from app.integrations.sap.mock import MockSAPGateway
 
 
 if __name__ == "__main__":
@@ -12,8 +11,6 @@ if __name__ == "__main__":
         bind=engine
     )
 
-    MockSAPGateway().reset()
-
     print(
-        "AP Agent database and mock SAP data reset."
+        "AP Agent database reset completed."
     )
