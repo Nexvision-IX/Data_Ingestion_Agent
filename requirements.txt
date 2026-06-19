@@ -2,6 +2,7 @@ aistudio-sdk==0.3.8
 altair==5.5.0
 annotated-doc==0.0.4
 annotated-types==0.7.0
+alembic
 anyio==4.13.0
 astor==0.8.1
 asttokens==3.0.1
@@ -113,6 +114,7 @@ prompt_toolkit==3.0.52
 proto-plus==1.28.0
 protobuf>=4.25.8,<6.0.0
 psutil==7.2.2
+psycopg[binary]
 pure_eval==0.2.3
 py-cpuinfo==9.0.0
 pyarrow==24.0.0
