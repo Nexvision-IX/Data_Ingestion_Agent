@@ -2,13 +2,27 @@ from __future__ import annotations
 
 import json
 import re
-import sqlite3
+import sys
 from pathlib import Path
 from typing import Any
 
-from app.config import settings
+from sqlalchemy import func, select
+from sqlalchemy.engine import Connection
+
 from app.integrations.sap.base import SAPGateway
 from app.models import Invoice
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
+
+from ap_database.engines import get_master_engine
+from ap_database.master_models import (
+    InvoiceMaster,
+    SapGRNMaster,
+    SapPOMaster,
+)
 
 
 def _vendor_key(value: str | None) -> str:
@@ -17,52 +31,38 @@ def _vendor_key(value: str | None) -> str:
     return cleaned[:50] or "UNKNOWN_VENDOR"
 
 
-def _load_items(items_json: str | None) -> list[dict[str, Any]]:
+def _load_items(items_json: Any) -> list[dict[str, Any]]:
     if not items_json:
         return []
+    if isinstance(items_json, list):
+        return items_json
 
     try:
         data = json.loads(items_json)
         return data if isinstance(data, list) else []
-    except Exception:
+    except (TypeError, ValueError):
         return []
 
 
-class APMasterSQLiteGateway(SAPGateway):
-    """
-    Reads PO and GRN context from your existing ingestion DB:
-
-        D:/ap_automation_demo/data/master/ap_master.db
-
-    Tables used:
-        sap_po_master
-        sap_grn_master
-    """
+class APMasterGateway(SAPGateway):
+    """Read AP master context through the configured shared database engine."""
 
     def __init__(self, path: Path | None = None):
-        self.path = Path(path or settings.ap_master_db_path)
+        # ``path`` is accepted only for compatibility with older callers.
+        # Connections now always come from MASTER_DATABASE_URL/DATABASE_URL.
+        del path
 
-    def _connect(self):
-        if not self.path.exists():
-            raise FileNotFoundError(
-                f"AP master DB not found: {self.path}. "
-                "Run your existing ingestion first."
-            )
-
-        conn = sqlite3.connect(self.path)
-        conn.row_factory = sqlite3.Row
-        return conn
+    def _connect(self) -> Connection:
+        return get_master_engine().connect()
 
     def get_invoice_context(self, invoice: Invoice) -> dict[str, Any]:
-        with self._connect() as conn:
-            po = self._get_po(conn, invoice.po_number)
-            grns = self._get_grns(conn, invoice.po_number)
+        with self._connect() as connection:
+            po = self._get_po(connection, invoice.po_number)
+            grns = self._get_grns(connection, invoice.po_number)
 
-        # Important:
-        # invoice_master is the source table for imported invoices.
-        # Do not treat the same source invoice as duplicate history.
+        # invoice_master is the source table for imported invoices. Do not
+        # treat the same source invoice as duplicate history.
         history = []
-
         vendor = None
 
         if po:
@@ -85,33 +85,37 @@ class APMasterSQLiteGateway(SAPGateway):
             "vendor": vendor,
             "grns": grns,
             "invoice_history": history,
+            # Preserve the existing marker for downstream compatibility even
+            # though the implementation now supports SQLite and PostgreSQL.
             "source": "AP_MASTER_SQLITE",
         }
 
-    def _get_po(self, conn, po_number: str | None) -> dict[str, Any] | None:
+    def _get_po(
+        self,
+        connection: Connection,
+        po_number: str | None,
+    ) -> dict[str, Any] | None:
         if not po_number:
             return None
 
-        row = conn.execute(
-            """
-            SELECT *
-            FROM sap_po_master
-            WHERE po_number = ?
-            """,
-            (po_number,),
-        ).fetchone()
+        table = SapPOMaster.__table__
+        statement = select(
+            table.c.po_number,
+            table.c.vendor_name,
+            table.c.currency,
+            table.c.po_status,
+            table.c.items_json,
+        ).where(table.c.po_number == po_number)
+        row = connection.execute(statement).mappings().first()
 
         if not row:
             return None
 
-        row = dict(row)
         raw_items = _load_items(row.get("items_json"))
-
         items = []
 
         for idx, item in enumerate(raw_items, start=1):
             line_no = item.get("line_no") or idx
-
             items.append(
                 {
                     "po_item": f"{int(line_no):05d}",
@@ -122,7 +126,6 @@ class APMasterSQLiteGateway(SAPGateway):
             )
 
         vendor_name = row.get("vendor_name") or ""
-
         return {
             "po_number": row.get("po_number"),
             "vendor_number": _vendor_key(vendor_name),
@@ -134,28 +137,32 @@ class APMasterSQLiteGateway(SAPGateway):
             "items": items,
         }
 
-    def _get_grns(self, conn, po_number: str | None) -> list[dict[str, Any]]:
+    def _get_grns(
+        self,
+        connection: Connection,
+        po_number: str | None,
+    ) -> list[dict[str, Any]]:
         if not po_number:
             return []
 
-        rows = conn.execute(
-            """
-            SELECT *
-            FROM sap_grn_master
-            WHERE po_number = ?
-            """,
-            (po_number,),
-        ).fetchall()
-
+        table = SapGRNMaster.__table__
+        statement = (
+            select(
+                table.c.gr_number,
+                table.c.po_number,
+                table.c.gr_status,
+                table.c.items_json,
+            )
+            .where(table.c.po_number == po_number)
+            .order_by(table.c.gr_number.asc())
+        )
+        rows = connection.execute(statement).mappings().all()
         output = []
 
         for row in rows:
-            row = dict(row)
             raw_items = _load_items(row.get("items_json"))
-
             for idx, item in enumerate(raw_items, start=1):
                 line_no = item.get("line_no") or idx
-
                 output.append(
                     {
                         "grn_number": row.get("gr_number"),
@@ -171,28 +178,28 @@ class APMasterSQLiteGateway(SAPGateway):
 
     def _get_invoice_history(
         self,
-        conn,
+        connection: Connection,
         invoice_number: str | None,
         vendor_name: str | None,
     ) -> list[dict[str, Any]]:
         if not invoice_number:
             return []
 
-        rows = conn.execute(
-            """
-            SELECT invoice_number, vendor_name, document_total, payment_status
-            FROM invoice_master
-            WHERE lower(invoice_number) = lower(?)
-            AND vendor_name = ?
-            """,
-            (invoice_number, vendor_name),
-        ).fetchall()
-
+        table = InvoiceMaster.__table__
+        statement = select(
+            table.c.invoice_number,
+            table.c.vendor_name,
+            table.c.document_total,
+            table.c.payment_status,
+        ).where(
+            func.lower(table.c.invoice_number) == invoice_number.lower(),
+            table.c.vendor_name == vendor_name,
+        )
+        rows = connection.execute(statement).mappings().all()
         return [dict(row) for row in rows]
 
     def pre_post_check(self, invoice: Invoice) -> dict[str, Any]:
         context = self.get_invoice_context(invoice)
-
         ok = bool(context.get("po")) and bool(context.get("vendor"))
 
         return {
@@ -209,3 +216,7 @@ class APMasterSQLiteGateway(SAPGateway):
         raise RuntimeError(
             "simulate_resolution is only supported by the mock SAP gateway."
         )
+
+
+# Compatibility alias for existing imports and configuration.
+APMasterSQLiteGateway = APMasterGateway

@@ -2,16 +2,26 @@ from __future__ import annotations
 
 import json
 import re
-import sqlite3
-from datetime import date
+import sys
+from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import String, cast, select
+from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 
-from app.config import settings
 from app.models import Invoice, InvoiceLine, WorkflowEvent
 from app.services.orchestrator import APOrchestrator
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
+
+from ap_database.engines import get_master_engine
+from ap_database.master_models import InvoiceMaster
 
 
 def _vendor_key(value: str | None) -> str:
@@ -20,24 +30,71 @@ def _vendor_key(value: str | None) -> str:
     return cleaned[:50] or "UNKNOWN_VENDOR"
 
 
-def _parse_date(value: str | None) -> date:
+def _parse_date(value: Any) -> date:
     if not value:
+        return date.today()
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+
+    raw_value = str(value).strip()
+    if not raw_value:
         return date.today()
 
     try:
-        return date.fromisoformat(value[:10])
-    except Exception:
-        return date.today()
+        return date.fromisoformat(raw_value[:10])
+    except ValueError:
+        pass
+
+    # Legacy SQLite rows may contain slash-separated dates. Values where one
+    # component exceeds 12 are unambiguous; ambiguous values retain the demo's
+    # US-style month/day interpretation while the original text remains in the
+    # source JSON for traceability.
+    parts = raw_value.split("/")
+    formats = ("%m/%d/%Y", "%d/%m/%Y")
+    if len(parts) == 3:
+        try:
+            first, second = int(parts[0]), int(parts[1])
+            if first > 12:
+                formats = ("%d/%m/%Y",)
+            elif second > 12:
+                formats = ("%m/%d/%Y",)
+        except ValueError:
+            pass
+
+    for date_format in formats:
+        try:
+            return datetime.strptime(raw_value, date_format).date()
+        except ValueError:
+            continue
+
+    # Preserve the previous local-demo fallback for unknown date formats.
+    return date.today()
 
 
-def _load_json(value: str | None, default):
+def _load_json(value: Any, default):
     if not value:
         return default
+    if isinstance(value, (dict, list)):
+        return value
 
     try:
         return json.loads(value)
-    except Exception:
+    except (TypeError, ValueError):
         return default
+
+
+def _json_compatible(value: Any) -> Any:
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, dict):
+        return {key: _json_compatible(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_compatible(item) for item in value]
+    return value
 
 
 class APMasterTriggerService:
@@ -48,17 +105,9 @@ class APMasterTriggerService:
 
     def __init__(self, db: Session):
         self.db = db
-        self.master_db_path = Path(settings.ap_master_db_path)
 
-    def _connect_master(self):
-        if not self.master_db_path.exists():
-            raise FileNotFoundError(
-                f"AP master DB not found: {self.master_db_path}"
-            )
-
-        conn = sqlite3.connect(self.master_db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+    def _connect_master(self) -> Connection:
+        return get_master_engine().connect()
 
     def process_new_invoices(self, limit: int = 50) -> dict:
         rows = self._fetch_master_invoices(limit=limit)
@@ -122,16 +171,35 @@ class APMasterTriggerService:
         }
 
     def _fetch_master_invoices(self, limit: int) -> list[dict]:
-        with self._connect_master() as conn:
-            rows = conn.execute(
-                """
-                SELECT *
-                FROM invoice_master
-                ORDER BY last_modified ASC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
+        table = InvoiceMaster.__table__
+        statement = (
+            select(
+                table.c.invoice_number,
+                table.c.po_number,
+                table.c.vendor_name,
+                # Cast legacy SQLite text dates before SQLAlchemy's Date result
+                # processor sees them. PostgreSQL dates safely cast to ISO text.
+                cast(table.c.invoice_date, String).label("invoice_date"),
+                table.c.currency,
+                table.c.document_subtotal,
+                table.c.tax_amount,
+                table.c.vat_percent,
+                table.c.document_total,
+                table.c.payment_status,
+                table.c.items_json,
+                table.c.raw_json,
+                cast(table.c.last_modified, String).label("last_modified"),
+                cast(table.c.updated_at, String).label("updated_at"),
+            )
+            .order_by(
+                table.c.last_modified.asc(),
+                table.c.invoice_number.asc(),
+            )
+            .limit(max(0, int(limit)))
+        )
+
+        with self._connect_master() as connection:
+            rows = connection.execute(statement).mappings().all()
 
         return [dict(row) for row in rows]
 
@@ -152,7 +220,7 @@ class APMasterTriggerService:
         invoice = Invoice(
             source="AP_MASTER_IMPORT",
             original_filename=f"{row.get('invoice_number')}.json",
-            file_path=str(self.master_db_path),
+            file_path="master_database",
             vendor_name=vendor_name,
             vendor_number=_vendor_key(vendor_name),
             invoice_number=row.get("invoice_number"),
@@ -167,9 +235,14 @@ class APMasterTriggerService:
             extraction_confidence=1.0,
             extraction_raw={
                 "source": "invoice_master",
-                "source_last_modified": row.get("last_modified"),
+                "source_last_modified": _json_compatible(
+                    row.get("last_modified")
+                ),
                 "payment_status": row.get("payment_status"),
-                "raw_json": _load_json(row.get("raw_json"), row),
+                "raw_json": _load_json(
+                    row.get("raw_json"),
+                    _json_compatible(row),
+                ),
             },
         )
 
@@ -200,9 +273,11 @@ class APMasterTriggerService:
                     "into AP Agent workflow."
                 ),
                 metadata_json={
-                    "source_db": str(self.master_db_path),
+                    "source_db": "configured_master_database",
                     "invoice_number": row.get("invoice_number"),
-                    "source_last_modified": row.get("last_modified"),
+                    "source_last_modified": _json_compatible(
+                        row.get("last_modified")
+                    ),
                 },
             )
         )
