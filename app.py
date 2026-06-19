@@ -3,11 +3,17 @@ import json
 import uuid
 from datetime import datetime
 from pathlib import Path
-import sqlite3
 
-import pandas as pd
 import requests
 import streamlit as st
+from ap_database.agent_monitor_repository import (
+    agent_db_available as ap_agent_db_exists,
+    load_ap_agent_communications,
+    load_ap_agent_events,
+    load_ap_agent_invoices,
+    load_ap_agent_summary,
+    load_ap_agent_validation_results,
+)
 from ap_database.master_repository import get_table_count, load_table_data
 from ingestion.master_ingestion import (
 
@@ -54,10 +60,6 @@ SAP_PASSWORD = os.getenv(
     "SAP_PASSWORD",
     ""
 )
-AP_AGENT_DB_PATH = os.getenv(
-    "AP_AGENT_DB_PATH",
-    "agent_app/ap_agent.db"
-)
 # -----------------------------------
 # INPUT DIRECTORY
 # -----------------------------------
@@ -87,206 +89,6 @@ def save_uploaded_file(uploaded_file):
         f.write(uploaded_file.getbuffer())
 
     return save_path
-
-
-def ap_agent_db_exists():
-    return Path(AP_AGENT_DB_PATH).exists()
-
-
-def load_ap_agent_summary():
-    if not ap_agent_db_exists():
-        return pd.DataFrame()
-
-    conn = sqlite3.connect(AP_AGENT_DB_PATH)
-
-    try:
-        query = """
-            SELECT
-                status,
-                COUNT(*) AS total
-            FROM invoices
-            GROUP BY status
-            ORDER BY total DESC
-        """
-        return pd.read_sql_query(query, conn)
-
-    finally:
-        conn.close()
-
-
-def load_ap_agent_invoices(limit=50):
-    if not ap_agent_db_exists():
-        return pd.DataFrame()
-
-    conn = sqlite3.connect(AP_AGENT_DB_PATH)
-
-    try:
-        query = """
-            SELECT
-                i.invoice_number,
-                i.vendor_name,
-                i.po_number,
-                i.currency,
-                i.total_amount,
-                i.status AS agent_status,
-                i.source,
-
-                (
-                    SELECT COUNT(*)
-                    FROM validation_results vr
-                    WHERE vr.invoice_id = i.id
-                    AND vr.passed = 0
-                ) AS failed_rule_count,
-
-                ec.category AS exception_category,
-                ec.priority AS exception_priority,
-                ec.owner_team AS exception_owner,
-                ec.status AS exception_status,
-
-                c.status AS email_status,
-                c.recipient AS email_recipient,
-                c.subject AS email_subject,
-                c.smtp_message_id,
-                c.created_at AS email_created_at,
-
-                pa.status AS posting_status,
-                pa.sap_document_number,
-                pa.message AS posting_message,
-
-                we.event_type AS latest_event,
-                we.agent_name AS latest_agent,
-                we.message AS latest_message,
-
-                i.created_at,
-                i.updated_at
-
-            FROM invoices i
-
-            LEFT JOIN exception_cases ec
-                ON ec.invoice_id = i.id
-
-            LEFT JOIN communications c
-                ON c.id = (
-                    SELECT c2.id
-                    FROM communications c2
-                    WHERE c2.invoice_id = i.id
-                    ORDER BY c2.created_at DESC
-                    LIMIT 1
-                )
-
-            LEFT JOIN posting_attempts pa
-                ON pa.id = (
-                    SELECT pa2.id
-                    FROM posting_attempts pa2
-                    WHERE pa2.invoice_id = i.id
-                    ORDER BY pa2.created_at DESC
-                    LIMIT 1
-                )
-
-            LEFT JOIN workflow_events we
-                ON we.id = (
-                    SELECT we2.id
-                    FROM workflow_events we2
-                    WHERE we2.invoice_id = i.id
-                    ORDER BY we2.created_at DESC
-                    LIMIT 1
-                )
-
-            ORDER BY i.created_at DESC
-            LIMIT ?
-        """
-
-        return pd.read_sql_query(query, conn, params=(limit,))
-
-    finally:
-        conn.close()
-
-
-def load_ap_agent_events(invoice_number):
-    if not ap_agent_db_exists():
-        return pd.DataFrame()
-
-    conn = sqlite3.connect(AP_AGENT_DB_PATH)
-
-    try:
-        query = """
-            SELECT
-                we.created_at,
-                we.event_type,
-                we.agent_name,
-                we.message
-            FROM workflow_events we
-            JOIN invoices i
-                ON i.id = we.invoice_id
-            WHERE i.invoice_number = ?
-            ORDER BY we.created_at DESC
-        """
-
-        return pd.read_sql_query(query, conn, params=(invoice_number,))
-
-    finally:
-        conn.close()
-
-
-def load_ap_agent_validation_results(invoice_number):
-    if not ap_agent_db_exists():
-        return pd.DataFrame()
-
-    conn = sqlite3.connect(AP_AGENT_DB_PATH)
-
-    try:
-        query = """
-            SELECT
-                vr.rule_code,
-                vr.rule_name,
-                vr.passed,
-                vr.severity,
-                vr.message,
-                vr.created_at
-            FROM validation_results vr
-            JOIN invoices i
-                ON i.id = vr.invoice_id
-            WHERE i.invoice_number = ?
-            ORDER BY vr.created_at DESC
-        """
-
-        return pd.read_sql_query(query, conn, params=(invoice_number,))
-
-    finally:
-        conn.close()
-
-
-def load_ap_agent_communications(invoice_number):
-    if not ap_agent_db_exists():
-        return pd.DataFrame()
-
-    conn = sqlite3.connect(AP_AGENT_DB_PATH)
-
-    try:
-        query = """
-            SELECT
-                c.created_at,
-                c.direction,
-                c.recipient,
-                c.subject,
-                c.body,
-                c.status,
-                c.smtp_message_id
-            FROM communications c
-            JOIN invoices i
-                ON i.id = c.invoice_id
-            WHERE i.invoice_number = ?
-            ORDER BY c.created_at DESC
-        """
-
-        return pd.read_sql_query(
-            query,
-            conn,
-            params=(invoice_number,),
-        )
-
-    finally:
-        conn.close()
 
 
 def init_line_items(state_key, default_item):
