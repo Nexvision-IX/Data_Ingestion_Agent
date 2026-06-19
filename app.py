@@ -8,6 +8,7 @@ import sqlite3
 import pandas as pd
 import requests
 import streamlit as st
+from ap_database.master_repository import get_table_count, load_table_data
 from ingestion.master_ingestion import (
 
     delete_invoice,
@@ -39,11 +40,6 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv()
-
-DB_PATH = os.getenv(
-    "MASTER_DB_PATH",
-    "data/master/ap_master.db"
-)
 
 API_BASE_URL = os.getenv(
     "MOCK_API_BASE_URL",
@@ -92,32 +88,6 @@ def save_uploaded_file(uploaded_file):
 
     return save_path
 
-
-def load_table_data(table_name, limit=10):
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        query = f"""
-            SELECT *
-            FROM {table_name}
-            ORDER BY ROWID DESC
-            LIMIT {limit}
-        """
-        return pd.read_sql_query(query, conn)
-    finally:
-        conn.close()
-
-
-def get_table_count(table_name):
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        query = f"""
-            SELECT COUNT(*) AS total
-            FROM {table_name}
-        """
-        df = pd.read_sql_query(query, conn,)
-        return int(df["total"][0])
-    finally:
-        conn.close()
 
 def ap_agent_db_exists():
     return Path(AP_AGENT_DB_PATH).exists()
