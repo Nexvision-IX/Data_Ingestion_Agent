@@ -46,9 +46,6 @@ class Settings:
     storage_path: Path = Path(os.getenv("STORAGE_PATH", "./storage"))
     mock_sap_data_path: Path = Path(os.getenv("MOCK_SAP_DATA_PATH", "./data/mock_sap.json"))
     sap_provider: str = os.getenv("SAP_PROVIDER", "mock").lower()
-    ap_master_db_path: Path = Path(
-        os.getenv("AP_MASTER_DB_PATH", "../data/master/ap_master.db")
-    )
     price_tolerance_percent: float = float(os.getenv("PRICE_TOLERANCE_PERCENT", "2.0"))
     recheck_max_attempts: int = int(os.getenv("RECHECK_MAX_ATTEMPTS", "3"))
     auto_post_clean_invoices: bool = _bool("AUTO_POST_CLEAN_INVOICES", True)
