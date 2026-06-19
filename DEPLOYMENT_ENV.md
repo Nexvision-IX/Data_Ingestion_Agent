@@ -13,3 +13,12 @@ explicitly intended.
 `AP_MASTER_DB_PATH` is legacy and no longer used by the Agent API. Configure
 master access with `MASTER_DATABASE_URL`.
 
+Before starting services, initialize and validate the configured databases:
+
+```powershell
+python scripts/init_rds_schema.py
+python scripts/check_rds_schema.py
+```
+
+Initialization is idempotent and non-destructive: it creates missing schemas
+and tables but never drops tables or deletes data.
