@@ -1,12 +1,38 @@
 from __future__ import annotations
 
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
 from app.api.routes import router
 from app.config import settings
 from app.db import Base, engine
 
-Base.metadata.create_all(bind=engine)
+
+logger = logging.getLogger("uvicorn.error")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if settings.auto_create_agent_tables:
+        logger.warning(
+            "Agent table auto-create is enabled "
+            "(environment=%s, database=%s).",
+            settings.app_env,
+            settings.database_backend,
+        )
+        Base.metadata.create_all(bind=engine)
+        logger.info("Agent table auto-create completed.")
+    else:
+        logger.info(
+            "Agent table auto-create skipped "
+            "(environment=%s, database=%s).",
+            settings.app_env,
+            settings.database_backend,
+        )
+
+    yield
 
 app = FastAPI(
     title=settings.app_name,
@@ -15,6 +41,7 @@ app = FastAPI(
         "Extensible AI agent-powered Accounts Payable "
         "reference project."
     ),
+    lifespan=lifespan,
 )
 app.include_router(router)
 

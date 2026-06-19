@@ -16,11 +16,32 @@ def _bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _is_postgres_url(url: str) -> bool:
+    normalized = url.strip().lower()
+    return normalized.startswith(("postgresql://", "postgresql+", "postgres://"))
+
+
+_APP_ENV = os.getenv("APP_ENV", "development")
+_DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./ap_agent.db")
+_SAFE_LOCAL_SCHEMA_DEFAULT = (
+    _APP_ENV.strip().lower() not in {"production", "prod"}
+    and not _is_postgres_url(_DATABASE_URL)
+)
+
+
 @dataclass(frozen=True)
 class Settings:
     app_name: str = os.getenv("APP_NAME", "AI AP Agent")
-    app_env: str = os.getenv("APP_ENV", "development")
-    database_url: str = os.getenv("DATABASE_URL", "sqlite:///./ap_agent.db")
+    app_env: str = _APP_ENV
+    database_url: str = _DATABASE_URL
+    auto_create_agent_tables: bool = _bool(
+        "AUTO_CREATE_AGENT_TABLES",
+        _SAFE_LOCAL_SCHEMA_DEFAULT,
+    )
+    allow_destructive_agent_reset: bool = _bool(
+        "ALLOW_DESTRUCTIVE_AGENT_RESET",
+        _SAFE_LOCAL_SCHEMA_DEFAULT,
+    )
     storage_path: Path = Path(os.getenv("STORAGE_PATH", "./storage"))
     mock_sap_data_path: Path = Path(os.getenv("MOCK_SAP_DATA_PATH", "./data/mock_sap.json"))
     sap_provider: str = os.getenv("SAP_PROVIDER", "mock").lower()
@@ -74,6 +95,14 @@ class Settings:
         "POSTED_INVOICE_API_PASSWORD",
         "sap_pass",
     )
+
+    @property
+    def database_backend(self) -> str:
+        if _is_postgres_url(self.database_url):
+            return "postgresql"
+        if self.database_url.strip().lower().startswith("sqlite"):
+            return "sqlite"
+        return "other"
 
 
 settings = Settings()
