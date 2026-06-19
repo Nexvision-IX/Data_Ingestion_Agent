@@ -35,14 +35,44 @@ from pipeline_runner import process_invoice_pipeline, sync_structured_sources
 # DATABASE PATH
 # -----------------------------------
 
-DB_PATH = "data/master/ap_master.db"
-API_BASE_URL = "https://data-ingestion-agent.onrender.com"
-AP_AGENT_DB_PATH = "agent_app/ap_agent.db"
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+DB_PATH = os.getenv(
+    "MASTER_DB_PATH",
+    "data/master/ap_master.db"
+)
+
+API_BASE_URL = os.getenv(
+    "MOCK_API_BASE_URL",
+    "http://127.0.0.1:8001"
+)
+SAP_USERNAME = os.getenv(
+    "SAP_USERNAME",
+    ""
+)
+
+SAP_PASSWORD = os.getenv(
+    "SAP_PASSWORD",
+    ""
+)
+AP_AGENT_DB_PATH = os.getenv(
+    "AP_AGENT_DB_PATH",
+    "agent_app/ap_agent.db"
+)
 # -----------------------------------
 # INPUT DIRECTORY
 # -----------------------------------
 
-INPUT_DIR = Path("unstructured_ingestion/unstructured_inputs")
+INPUT_DIR = Path(
+    os.getenv(
+        "UNSTRUCTURED_INPUT_DIR",
+        "unstructured_ingestion/unstructured_inputs"
+    )
+)
+
 INPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -1076,7 +1106,7 @@ elif selected_module == "Test Data Setup (Manual Invoice + PO/GRN API)":
                     response = requests.post(
                         f"{API_BASE_URL}/sap/po",
                         json=payload,
-                        auth=("sap_user", "sap_pass"),
+                        auth=(SAP_USERNAME, SAP_PASSWORD),
                         timeout=60,
                     )
 
@@ -1146,9 +1176,9 @@ elif selected_module == "Test Data Setup (Manual Invoice + PO/GRN API)":
                     }
 
                     response = requests.post(
-                        f"{API_BASE_URL}/sap/grn",
+                        f"{API_BASE_URL}/sap/gr",
                         json=payload,
-                        auth=("sap_user", "sap_pass"),
+                        auth=(SAP_USERNAME, SAP_PASSWORD),
                         timeout=60,
                     )
 
@@ -1187,9 +1217,9 @@ elif selected_module == "Admin Data Manager":
     )
 
     confirm_reset = st.checkbox(
-        "I understand this will clear master tables and reset sync state",
-        key="confirm_reset_demo"
-    )
+    "I understand this will clear invoice_master, PO, GRN, posted invoice tables, and reset sync state. AP Agent DB reset will be handled separately.",
+    key="confirm_reset_demo"
+        )
 
     if confirm_reset:
 
