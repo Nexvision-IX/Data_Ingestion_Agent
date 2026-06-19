@@ -23,8 +23,9 @@ def _is_postgres_url(url: str) -> bool:
 
 _APP_ENV = os.getenv("APP_ENV", "development")
 _DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./ap_agent.db")
+_SAFE_ENVIRONMENTS = {"production", "prod", "staging", "stage", "demo", "aws"}
 _SAFE_LOCAL_SCHEMA_DEFAULT = (
-    _APP_ENV.strip().lower() not in {"production", "prod"}
+    _APP_ENV.strip().lower() not in _SAFE_ENVIRONMENTS
     and not _is_postgres_url(_DATABASE_URL)
 )
 

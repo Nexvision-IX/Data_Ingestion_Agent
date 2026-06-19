@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.agents.extraction_agent import SCENARIOS
+from app.config import settings
 from app.db import Base, engine, get_db
 from app.integrations.sap.mock import MockSAPGateway
 from app.models import ExceptionCase, Invoice
@@ -236,6 +237,18 @@ def process_new_ap_master_invoices(
 def reset_demo(
     db: Session = Depends(get_db),
 ):
+    if not settings.allow_destructive_agent_reset:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Destructive demo reset is disabled for "
+                f"environment '{settings.app_env}' and database backend "
+                f"'{settings.database_backend}'. Set "
+                "ALLOW_DESTRUCTIVE_AGENT_RESET=true only when an "
+                "intentional reset is required."
+            ),
+        )
+
     db.close()
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
