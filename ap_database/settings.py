@@ -14,6 +14,21 @@ load_dotenv()
 
 
 DEFAULT_AGENT_DATABASE_URL = "sqlite:///./agent_app/ap_agent.db"
+SAFE_DEPLOYMENT_ENVIRONMENTS = {
+    "production",
+    "prod",
+    "staging",
+    "stage",
+    "demo",
+    "aws",
+}
+
+
+def _bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def is_postgres_url(url: str) -> bool:
@@ -44,17 +59,27 @@ class DatabaseSettings:
     app_env: str
     database_url: str
     master_database_url: str
+    allow_destructive_master_reset: bool
 
 
 def load_database_settings() -> DatabaseSettings:
     """Load database settings, retaining SQLite defaults for local use."""
+    app_env = os.getenv("APP_ENV", "development")
     database_url = os.getenv("DATABASE_URL", DEFAULT_AGENT_DATABASE_URL)
     master_database_url = os.getenv("MASTER_DATABASE_URL") or database_url
+    safe_local_default = (
+        app_env.strip().lower() not in SAFE_DEPLOYMENT_ENVIRONMENTS
+        and not is_postgres_url(master_database_url)
+    )
 
     return DatabaseSettings(
-        app_env=os.getenv("APP_ENV", "development"),
+        app_env=app_env,
         database_url=database_url,
         master_database_url=master_database_url,
+        allow_destructive_master_reset=_bool(
+            "ALLOW_DESTRUCTIVE_MASTER_RESET",
+            safe_local_default,
+        ),
     )
 
 

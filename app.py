@@ -15,6 +15,7 @@ from ap_database.agent_monitor_repository import (
     load_ap_agent_validation_results,
 )
 from ap_database.master_repository import get_table_count, load_table_data
+from ap_database.settings import settings as database_settings
 from ingestion.master_ingestion import (
 
     delete_invoice,
@@ -89,6 +90,15 @@ def save_uploaded_file(uploaded_file):
         f.write(uploaded_file.getbuffer())
 
     return save_path
+
+
+def show_master_reset_blocked_message():
+    st.error(
+        "Destructive master reset/clear operations are disabled for this "
+        "environment or database. Set "
+        "ALLOW_DESTRUCTIVE_MASTER_RESET=true only when an intentional "
+        "reset is required."
+    )
 
 
 def init_line_items(state_key, default_item):
@@ -1000,30 +1010,33 @@ elif selected_module == "Admin Data Manager":
             key="reset_demo_btn"
         ):
 
-            try:
+            if not database_settings.allow_destructive_master_reset:
+                show_master_reset_blocked_message()
+            else:
+                try:
 
-                result = reset_demo_environment()
+                    result = reset_demo_environment()
 
-                if result.get("status") == "success":
+                    if result.get("status") == "success":
 
-                    st.success(
-                        "Demo environment reset."
-                    )
-
-                    st.rerun()
-
-                else:
-
-                    st.error(
-                        result.get(
-                            "error",
-                            "Reset failed"
+                        st.success(
+                            "Demo environment reset."
                         )
-                    )
 
-            except Exception as e:
+                        st.rerun()
 
-                st.exception(e)
+                    else:
+
+                        st.error(
+                            result.get(
+                                "error",
+                                "Reset failed"
+                            )
+                        )
+
+                except Exception as e:
+
+                    st.exception(e)
 
     st.divider()
 
@@ -1129,11 +1142,14 @@ elif selected_module == "Admin Data Manager":
             "Clear Invoice Table"
         ):
 
-            clear_invoice_table()
+            if not database_settings.allow_destructive_master_reset:
+                show_master_reset_blocked_message()
+            else:
+                clear_invoice_table()
 
-            st.success(
-                "Invoice table cleared."
-            )
+                st.success(
+                    "Invoice table cleared."
+                )
 
     with col2:
 
@@ -1141,11 +1157,14 @@ elif selected_module == "Admin Data Manager":
             "Clear PO Table"
         ):
 
-            clear_po_table()
+            if not database_settings.allow_destructive_master_reset:
+                show_master_reset_blocked_message()
+            else:
+                clear_po_table()
 
-            st.success(
-                "PO table cleared."
-            )
+                st.success(
+                    "PO table cleared."
+                )
 
     with col3:
 
@@ -1153,11 +1172,14 @@ elif selected_module == "Admin Data Manager":
             "Clear GRN Table"
         ):
 
-            clear_grn_table()
+            if not database_settings.allow_destructive_master_reset:
+                show_master_reset_blocked_message()
+            else:
+                clear_grn_table()
 
-            st.success(
-                "GRN table cleared."
-            )
+                st.success(
+                    "GRN table cleared."
+                )
 
     with col4:
 
@@ -1165,11 +1187,14 @@ elif selected_module == "Admin Data Manager":
             "Clear Posted Invoice Table"
         ):
 
-            clear_posted_invoice_table()
+            if not database_settings.allow_destructive_master_reset:
+                show_master_reset_blocked_message()
+            else:
+                clear_posted_invoice_table()
 
-            st.success(
-                "Posted invoice table cleared."
-            )
+                st.success(
+                    "Posted invoice table cleared."
+                )
     st.divider()
 
     # ==========================
