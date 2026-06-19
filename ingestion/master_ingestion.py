@@ -1,8 +1,9 @@
 import json
-import sqlite3
 from datetime import datetime
 from pathlib import Path
 
+from ap_database import master_repository
+from ap_database.engines import get_master_engine
 from ingestion.clients.sap_client import SAPClient
 from ingestion.clients.kefron_client import KefronClient
 from ingestion.ap_agent_trigger import trigger_ap_agent_process_new
@@ -15,17 +16,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 STATE_FILE = PROJECT_ROOT / "state" / "last_run.json"
 
-MASTER_DB_PATH = PROJECT_ROOT / "data" / "master" / "ap_master.db"
-
 STATE_FILE.parent.mkdir(
     parents=True,
     exist_ok=True
 )
 
-MASTER_DB_PATH.parent.mkdir(
-    parents=True,
-    exist_ok=True
-)
 # -----------------------------------
 # CREATE CLIENTS
 # -----------------------------------
@@ -39,165 +34,20 @@ kefron_client = KefronClient()
 # -----------------------------------
 
 def get_conn():
+    """Legacy compatibility wrapper for callers managing a transaction.
 
-    conn = sqlite3.connect(
-        MASTER_DB_PATH
-    )
-
-    conn.execute(
-        "PRAGMA foreign_keys = ON;"
-    )
-
-    return conn
+    New code should call master_repository functions directly. Existing callers
+    still use ``with get_conn() as conn`` followed by ``conn.commit()``; a
+    SQLAlchemy Connection preserves that contract for SQLite and PostgreSQL.
+    """
+    return get_master_engine().connect()
 
 # -----------------------------------
 # INIT DATABASE
 # -----------------------------------
 
 def init_db():
-
-    with get_conn() as conn:
-
-        conn.execute("""
-
-            CREATE TABLE IF NOT EXISTS invoice_master (
-
-                invoice_number TEXT PRIMARY KEY,
-
-                po_number TEXT,
-
-                vendor_name TEXT,
-
-                invoice_date TEXT,
-
-                currency TEXT,
-
-                document_subtotal REAL,
-
-                tax_amount REAL,
-
-                vat_percent REAL,
-
-                document_total REAL,
-
-                payment_status TEXT,
-
-                items_json TEXT,
-
-                raw_json TEXT,
-
-                last_modified TEXT,
-
-                updated_at TEXT
-            )
-
-        """)
-
-        conn.execute("""
-
-            CREATE TABLE IF NOT EXISTS sap_po_master (
-
-                po_number TEXT PRIMARY KEY,
-
-                vendor_name TEXT,
-
-                po_date TEXT,
-
-                currency TEXT,
-
-                document_subtotal REAL,
-
-                tax_amount REAL,
-
-                vat_percent REAL,
-
-                document_total REAL,
-
-                po_status TEXT,
-
-                items_json TEXT,
-
-                raw_json TEXT,
-
-                last_modified TEXT,
-
-                updated_at TEXT
-            )
-
-        """)
-
-        conn.execute("""
-
-            CREATE TABLE IF NOT EXISTS sap_grn_master (
-
-                gr_number TEXT PRIMARY KEY,
-
-                po_number TEXT,
-
-                vendor_name TEXT,
-
-                gr_date TEXT,
-
-                currency TEXT,
-
-                document_subtotal REAL,
-
-                document_total REAL,
-
-                gr_status TEXT,
-
-                items_json TEXT,
-
-                raw_json TEXT,
-
-                last_modified TEXT,
-
-                updated_at TEXT
-            )
-
-        """)
-        conn.execute("""
-
-            CREATE TABLE IF NOT EXISTS sap_posted_invoice_master (
-
-                invoice_number TEXT PRIMARY KEY,
-
-                po_number TEXT,
-
-                vendor_name TEXT,
-
-                invoice_date TEXT,
-
-                currency TEXT,
-
-                document_subtotal REAL,
-
-                tax_amount REAL,
-
-                vat_percent REAL,
-
-                document_total REAL,
-
-                payment_status TEXT,
-
-                items_json TEXT,
-
-                raw_json TEXT,
-
-                sap_document_number TEXT,
-
-                posting_status TEXT,
-
-                posting_message TEXT,
-
-                source_system TEXT,
-
-                posted_at TEXT,
-
-                updated_at TEXT
-            )
-
-        """)
+    return master_repository.init_master_schema_if_needed()
 # -----------------------------------
 # WATERMARK / CHECKPOINT
 # -----------------------------------
@@ -394,83 +244,7 @@ def fetch_gr_data(since_date):
 # -----------------------------------
 
 def upsert_invoice(conn, row):
-
-    now = datetime.now().isoformat(
-        timespec="seconds"
-    )
-
-    conn.execute("""
-
-        INSERT INTO invoice_master (
-
-            invoice_number,
-            po_number,
-            vendor_name,
-            invoice_date,
-            currency,
-
-            document_subtotal,
-            tax_amount,
-            vat_percent,
-            document_total,
-
-            payment_status,
-
-            items_json,
-            raw_json,
-
-            last_modified,
-            updated_at
-
-        )
-
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-
-        ON CONFLICT(invoice_number) DO UPDATE SET
-
-            po_number=excluded.po_number,
-            vendor_name=excluded.vendor_name,
-            invoice_date=excluded.invoice_date,
-            currency=excluded.currency,
-
-            document_subtotal=excluded.document_subtotal,
-            tax_amount=excluded.tax_amount,
-            vat_percent=excluded.vat_percent,
-            document_total=excluded.document_total,
-
-            payment_status=excluded.payment_status,
-
-            items_json=excluded.items_json,
-            raw_json=excluded.raw_json,
-
-            last_modified=excluded.last_modified,
-            updated_at=excluded.updated_at
-
-    """, (
-
-        row.get("invoice_number"),
-        row.get("po_number"),
-        row.get("vendor_name"),
-        row.get("invoice_date"),
-        row.get("currency"),
-
-        row.get("document_subtotal"),
-        row.get("tax_amount"),
-        row.get("vat_percent"),
-        row.get("document_total"),
-
-        row.get("payment_status"),
-
-        json.dumps(
-            row.get("line_items", [])
-        ),
-
-        json.dumps(row),
-
-        row.get("last_modified"),
-
-        now
-    ))
+    return master_repository.upsert_invoice(row, connection=conn)
 
 def upsert_posted_invoice(
     conn,
@@ -480,246 +254,23 @@ def upsert_posted_invoice(
     posting_message=None,
     source_system="AP_AGENT",
 ):
-
-    now = datetime.now().isoformat(
-        timespec="seconds"
+    payload = dict(row)
+    payload.update(
+        sap_document_number=sap_document_number,
+        posting_status=posting_status,
+        posting_message=posting_message,
+        source_system=source_system,
     )
-
-    conn.execute("""
-
-        INSERT INTO sap_posted_invoice_master (
-
-            invoice_number,
-            po_number,
-            vendor_name,
-            invoice_date,
-            currency,
-
-            document_subtotal,
-            tax_amount,
-            vat_percent,
-            document_total,
-
-            payment_status,
-
-            items_json,
-            raw_json,
-
-            sap_document_number,
-            posting_status,
-            posting_message,
-            source_system,
-
-            posted_at,
-            updated_at
-
-        )
-
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-
-        ON CONFLICT(invoice_number) DO UPDATE SET
-
-            po_number=excluded.po_number,
-            vendor_name=excluded.vendor_name,
-            invoice_date=excluded.invoice_date,
-            currency=excluded.currency,
-
-            document_subtotal=excluded.document_subtotal,
-            tax_amount=excluded.tax_amount,
-            vat_percent=excluded.vat_percent,
-            document_total=excluded.document_total,
-
-            payment_status=excluded.payment_status,
-
-            items_json=excluded.items_json,
-            raw_json=excluded.raw_json,
-
-            sap_document_number=excluded.sap_document_number,
-            posting_status=excluded.posting_status,
-            posting_message=excluded.posting_message,
-            source_system=excluded.source_system,
-
-            posted_at=excluded.posted_at,
-            updated_at=excluded.updated_at
-
-    """, (
-
-        row.get("invoice_number"),
-        row.get("po_number"),
-        row.get("vendor_name"),
-        row.get("invoice_date"),
-        row.get("currency"),
-
-        row.get("document_subtotal"),
-        row.get("tax_amount"),
-        row.get("vat_percent"),
-        row.get("document_total"),
-
-        row.get("payment_status"),
-
-        json.dumps(
-            row.get("line_items", [])
-        ),
-
-        json.dumps(row),
-
-        sap_document_number,
-        posting_status,
-        posting_message,
-        source_system,
-
-        now,
-        now
-    ))
+    return master_repository.upsert_posted_invoice(
+        payload,
+        connection=conn,
+    )
 def upsert_po(conn, row):
-
-    now = datetime.now().isoformat(
-        timespec="seconds"
-    )
-
-    conn.execute("""
-
-        INSERT INTO sap_po_master (
-
-            po_number,
-            vendor_name,
-            po_date,
-            currency,
-
-            document_subtotal,
-            tax_amount,
-            vat_percent,
-            document_total,
-
-            po_status,
-
-            items_json,
-            raw_json,
-
-            last_modified,
-            updated_at
-
-        )
-
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-
-        ON CONFLICT(po_number) DO UPDATE SET
-
-            vendor_name=excluded.vendor_name,
-            po_date=excluded.po_date,
-            currency=excluded.currency,
-
-            document_subtotal=excluded.document_subtotal,
-            tax_amount=excluded.tax_amount,
-            vat_percent=excluded.vat_percent,
-            document_total=excluded.document_total,
-
-            po_status=excluded.po_status,
-
-            items_json=excluded.items_json,
-            raw_json=excluded.raw_json,
-
-            last_modified=excluded.last_modified,
-            updated_at=excluded.updated_at
-
-    """, (
-
-        row.get("po_number"),
-        row.get("vendor_name"),
-        row.get("po_date"),
-        row.get("currency"),
-
-        row.get("document_subtotal"),
-        row.get("tax_amount"),
-        row.get("vat_percent"),
-        row.get("document_total"),
-
-        row.get("po_status"),
-
-        json.dumps(
-            row.get("line_items", [])
-        ),
-
-        json.dumps(row),
-
-        row.get("last_modified"),
-
-        now
-    ))
+    return master_repository.upsert_po(row, connection=conn)
 
 
 def upsert_gr(conn, row):
-
-    now = datetime.now().isoformat(
-        timespec="seconds"
-    )
-
-    conn.execute("""
-
-        INSERT INTO sap_grn_master (
-
-            gr_number,
-            po_number,
-            vendor_name,
-            gr_date,
-            currency,
-
-            document_subtotal,
-            document_total,
-
-            gr_status,
-
-            items_json,
-            raw_json,
-
-            last_modified,
-            updated_at
-
-        )
-
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-
-        ON CONFLICT(gr_number) DO UPDATE SET
-
-            po_number=excluded.po_number,
-            vendor_name=excluded.vendor_name,
-            gr_date=excluded.gr_date,
-            currency=excluded.currency,
-
-            document_subtotal=excluded.document_subtotal,
-            document_total=excluded.document_total,
-
-            gr_status=excluded.gr_status,
-
-            items_json=excluded.items_json,
-            raw_json=excluded.raw_json,
-
-            last_modified=excluded.last_modified,
-            updated_at=excluded.updated_at
-
-    """, (
-
-        row.get("gr_number"),
-        row.get("po_number"),
-        row.get("vendor_name"),
-        row.get("gr_date"),
-        row.get("currency"),
-
-        row.get("document_subtotal"),
-        row.get("document_total"),
-
-        row.get("gr_status"),
-
-        json.dumps(
-            row.get("line_items", [])
-        ),
-
-        json.dumps(row),
-
-        row.get("last_modified"),
-
-        now
-    ))
+    return master_repository.upsert_grn(row, connection=conn)
 
 # -----------------------------------
 # MAIN INGESTION FLOW
@@ -872,162 +423,39 @@ if __name__ == "__main__":
 # -----------------------------------
 
 def delete_invoice(invoice_number):
-
-    with get_conn() as conn:
-
-        cursor = conn.cursor()
-
-        cursor.execute(
-
-            """
-            DELETE FROM invoice_master
-            WHERE invoice_number = ?
-            """,
-
-            (invoice_number,)
-        )
-
-        conn.commit()
+    return master_repository.delete_invoice(invoice_number)
 
 
 def delete_posted_invoice(invoice_number):
-
-    with get_conn() as conn:
-
-        cursor = conn.cursor()
-
-        cursor.execute(
-
-            """
-            DELETE FROM sap_posted_invoice_master
-            WHERE invoice_number = ?
-            """,
-
-            (invoice_number,)
-        )
-
-        conn.commit()
+    return master_repository.delete_posted_invoice(invoice_number)
 
 
 def delete_po(po_number):
-
-    with get_conn() as conn:
-
-        cursor = conn.cursor()
-
-        cursor.execute(
-
-            """
-            DELETE FROM sap_po_master
-            WHERE po_number = ?
-            """,
-
-            (po_number,)
-        )
-
-        conn.commit()
+    return master_repository.delete_po(po_number)
 
 
 def delete_grn(grn_number):
-
-    with get_conn() as conn:
-
-        cursor = conn.cursor()
-
-        cursor.execute(
-
-            """
-            DELETE FROM sap_grn_master
-            WHERE gr_number = ?
-            """,
-
-            (grn_number,)
-        )
-
-        conn.commit()
+    return master_repository.delete_grn(grn_number)
 
 
 def clear_invoice_table():
-
-    with get_conn() as conn:
-
-        cursor = conn.cursor()
-
-        cursor.execute(
-            "DELETE FROM invoice_master"
-        )
-
-        conn.commit()
+    return master_repository.clear_invoice_table()
 
 
 def clear_po_table():
-
-    with get_conn() as conn:
-
-        cursor = conn.cursor()
-
-        cursor.execute(
-            "DELETE FROM sap_po_master"
-        )
-
-        conn.commit()
+    return master_repository.clear_po_table()
 
 
 def clear_grn_table():
-
-    with get_conn() as conn:
-
-        cursor = conn.cursor()
-
-        cursor.execute(
-            "DELETE FROM sap_grn_master"
-        )
-
-        conn.commit()
+    return master_repository.clear_grn_table()
 
 def clear_posted_invoice_table():
-
-    with get_conn() as conn:
-
-        cursor = conn.cursor()
-
-        cursor.execute(
-            "DELETE FROM sap_posted_invoice_master"
-        )
-
-        conn.commit()
+    return master_repository.clear_posted_invoice_table()
 def keep_latest_rows(
     table_name,
     keep_count=10
 ):
-
-    with get_conn() as conn:
-
-        cursor = conn.cursor()
-
-        query = f"""
-
-        DELETE FROM {table_name}
-
-        WHERE rowid NOT IN (
-
-            SELECT rowid
-
-            FROM {table_name}
-
-            ORDER BY last_modified DESC
-
-            LIMIT ?
-
-        )
-        """
-
-        cursor.execute(
-            query,
-            (keep_count,)
-        )
-
-        conn.commit()
+    return master_repository.keep_latest_rows(table_name, keep_count)
 
 
 def reset_demo_environment():
@@ -1046,24 +474,4 @@ def reset_demo_environment():
             indent=4
         )
 
-    with get_conn() as conn:
-
-        conn.execute(
-            "DELETE FROM invoice_master"
-        )
-
-        conn.execute(
-            "DELETE FROM sap_po_master"
-        )
-
-        conn.execute(
-            "DELETE FROM sap_grn_master"
-        )
-        conn.execute(
-            "DELETE FROM sap_posted_invoice_master"
-        )
-        conn.commit()
-
-    return {
-        "status": "success"
-    }
+    return master_repository.reset_demo_environment()
