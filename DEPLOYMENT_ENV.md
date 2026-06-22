@@ -90,10 +90,16 @@ invoice number is not known at upload time, generate an `upload_id`, store the
 artifacts under that identifier, and later link the `upload_id` to the extracted
 invoice number in `processing_metadata.json` and RDS metadata.
 
-RDS will later store the S3 keys or URIs for the original file, extracted OCR
-text, and extracted structured JSON. RDS must store references and processing
-metadata, not the file blobs themselves. Database model and migration work for
-artifact-key persistence remains a later step.
+RDS stores the S3/local keys or URIs for the original file, extracted OCR
+text, extracted structured JSON, and processing metadata. The
+`invoice_artifacts` table links an `invoice_number` and/or `upload_id` to these
+artifact references. File contents remain in S3 or the configured local storage
+root and are never stored as database blobs.
+
+Step 15C creates `invoice_artifacts` during explicit schema initialization. Run
+the initialization before deployment even when the Agent database already
+exists, because `create_all()` creates this missing table but does not alter
+existing tables.
 
 ## Python environment
 

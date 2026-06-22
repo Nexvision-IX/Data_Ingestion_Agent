@@ -32,6 +32,7 @@ REQUIRED_MASTER_TABLES = {
 }
 
 REQUIRED_AGENT_TABLES = {
+    "invoice_artifacts",
     "invoices",
     "invoice_lines",
     "validation_results",
@@ -121,4 +122,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

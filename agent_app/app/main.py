@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from app.api.routes import router
 from app.config import settings
 from app.db import Base, engine
+from app.artifact_models import ArtifactBase
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -23,6 +24,7 @@ async def lifespan(app: FastAPI):
             settings.database_backend,
         )
         Base.metadata.create_all(bind=engine)
+        ArtifactBase.metadata.create_all(bind=engine)
         logger.info("Agent table auto-create completed.")
     else:
         logger.info(

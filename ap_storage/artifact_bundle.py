@@ -32,6 +32,7 @@ class InvoiceArtifactBundle:
             "original_file": None,
             "extracted_text": None,
             "extracted_json": None,
+            "processing_metadata": None,
         }
     )
     timestamps: dict[str, str] = field(
@@ -122,8 +123,10 @@ class InvoiceArtifactBundle:
         if extra:
             payload["details"] = extra
 
-        return self.storage.save_json(
+        metadata = self.storage.save_json(
             processing_metadata_key(**self._key_arguments()),
             payload,
             artifact_type="processing_metadata",
         )
+        self.artifacts["processing_metadata"] = metadata
+        return metadata

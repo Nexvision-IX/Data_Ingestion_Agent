@@ -20,6 +20,7 @@ if str(AGENT_APP_ROOT) not in sys.path:
 load_dotenv(PROJECT_ROOT / ".env")
 
 from ap_database.engines import get_agent_engine, get_master_engine
+from ap_database.agent_artifact_models import ArtifactBase
 from ap_database.master_models import MASTER_SCHEMA, MasterBase
 from ap_database.settings import (
     is_postgres_url,
@@ -66,7 +67,9 @@ def main() -> int:
         )
 
     try:
-        Base.metadata.create_all(bind=get_agent_engine())
+        agent_engine = get_agent_engine()
+        Base.metadata.create_all(bind=agent_engine)
+        ArtifactBase.metadata.create_all(bind=agent_engine)
         print("[SUCCESS] Agent tables are initialized.")
     except Exception as exc:
         success = False

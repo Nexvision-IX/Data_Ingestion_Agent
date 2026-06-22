@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.agents.extraction_agent import SCENARIOS
 from app.config import settings
 from app.db import Base, engine, get_db
+from app.artifact_models import ArtifactBase
 from app.integrations.sap.mock import MockSAPGateway
 from app.models import ExceptionCase, Invoice
 from app.schemas import (
@@ -250,8 +251,10 @@ def reset_demo(
         )
 
     db.close()
+    ArtifactBase.metadata.drop_all(bind=engine)
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
+    ArtifactBase.metadata.create_all(bind=engine)
     MockSAPGateway().reset()
     return {
         "status": "reset",

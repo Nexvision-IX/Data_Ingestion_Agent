@@ -19,6 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
 from ap_storage import InvoiceArtifactBundle, get_storage_service
+from ap_database.artifact_repository import save_artifact_bundle_metadata
 
 
 class IntakeService:
@@ -75,6 +76,10 @@ class IntakeService:
                 status="success",
                 extra={"processing_flow": "agent_api_mock_extraction"},
             )
+            save_artifact_bundle_metadata(
+                artifact_bundle,
+                session=self.db,
+            )
             return self._persist(
                 extracted,
                 source="UPLOAD",
@@ -90,6 +95,7 @@ class IntakeService:
                         "error_type": type(exc).__name__,
                     },
                 )
+                save_artifact_bundle_metadata(artifact_bundle)
             except Exception:
                 pass
             raise

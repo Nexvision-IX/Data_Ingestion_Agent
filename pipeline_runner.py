@@ -4,6 +4,7 @@ import uuid
 from pathlib import Path
 
 from ap_storage import InvoiceArtifactBundle, get_storage_service
+from ap_database.artifact_repository import save_artifact_bundle_metadata
 # -----------------------------------
 # STRUCTURED INGESTION
 # -----------------------------------
@@ -99,10 +100,12 @@ def _save_failure_metadata(
     if error:
         details["error"] = error
     try:
-        return bundle.save_processing_metadata(
+        metadata = bundle.save_processing_metadata(
             status="failed",
             extra=details,
         )
+        save_artifact_bundle_metadata(bundle)
+        return metadata
     except Exception as metadata_error:
         print(
             "Processing metadata could not be stored: "
@@ -195,6 +198,7 @@ def process_invoice_pipeline(
         processing_metadata = bundle.save_processing_metadata(
             status="success",
         )
+        save_artifact_bundle_metadata(bundle)
 
         # ---------------------------
         # TOTAL TIME
