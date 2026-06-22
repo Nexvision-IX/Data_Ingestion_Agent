@@ -101,6 +101,37 @@ the initialization before deployment even when the Agent database already
 exists, because `create_all()` creates this missing table but does not alter
 existing tables.
 
+## Validate S3/IAM access
+
+Run this on EC2 after `.env` is configured and before PM2 startup:
+
+```bash
+python scripts/s3_preflight.py
+```
+
+We created this preflight because environment validation alone only confirms that
+S3 settings are present. It does not prove that the EC2 instance can actually
+authenticate to AWS, access the bucket, or write/read objects under the configured
+prefix.
+
+The AP demo depends on S3 for storing invoice artifacts, including original
+uploads, extracted OCR text, extracted JSON, and processing metadata. If S3
+access fails after PM2 startup, invoice processing may partially run and then
+fail during artifact persistence. This check catches IAM role, bucket permission,
+region, and prefix issues before the application services are started.
+
+The script uses the EC2 IAM instance role or the normal AWS credential chain. It
+verifies:
+
+- AWS identity resolution
+- S3 bucket reachability
+- object write under `S3_PREFIX`
+- object metadata read
+- object content read-back
+
+The test object is retained under the configured readiness prefix so deployment
+validation has an audit trail.
+
 ## Python environment
 
 Create a Python 3.11 virtual environment in each service directory (or once in

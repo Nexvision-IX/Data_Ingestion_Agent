@@ -188,6 +188,7 @@ def main() -> int:
             "S3 artifact key template: "
             "<prefix>/invoices/{invoice_number_or_upload_id}/<artifact>/..."
         )
+        print("S3 live access check: run `python scripts/s3_preflight.py` on EC2.")
         endpoint = os.getenv("S3_ENDPOINT_URL", "").strip()
         if endpoint and not _is_http_url(endpoint):
             errors.append("S3_ENDPOINT_URL must be a valid HTTP or HTTPS URL.")
