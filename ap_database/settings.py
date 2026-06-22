@@ -65,10 +65,37 @@ class DatabaseSettings:
 def load_database_settings() -> DatabaseSettings:
     """Load database settings, retaining SQLite defaults for local use."""
     app_env = os.getenv("APP_ENV", "development")
-    database_url = os.getenv("DATABASE_URL", DEFAULT_AGENT_DATABASE_URL)
-    master_database_url = os.getenv("MASTER_DATABASE_URL") or database_url
+    normalized_env = app_env.strip().lower()
+    configured_database_url = os.getenv("DATABASE_URL", "").strip()
+    configured_master_database_url = os.getenv(
+        "MASTER_DATABASE_URL",
+        "",
+    ).strip()
+
+    if normalized_env in SAFE_DEPLOYMENT_ENVIRONMENTS:
+        if not configured_database_url:
+            raise RuntimeError(
+                "DATABASE_URL is required in deployment environments."
+            )
+        if not configured_master_database_url:
+            raise RuntimeError(
+                "MASTER_DATABASE_URL is required in deployment environments."
+            )
+        if not is_postgres_url(configured_database_url):
+            raise RuntimeError(
+                "DATABASE_URL must be a PostgreSQL URL in deployment "
+                "environments."
+            )
+        if not is_postgres_url(configured_master_database_url):
+            raise RuntimeError(
+                "MASTER_DATABASE_URL must be a PostgreSQL URL in deployment "
+                "environments."
+            )
+
+    database_url = configured_database_url or DEFAULT_AGENT_DATABASE_URL
+    master_database_url = configured_master_database_url or database_url
     safe_local_default = (
-        app_env.strip().lower() not in SAFE_DEPLOYMENT_ENVIRONMENTS
+        normalized_env not in SAFE_DEPLOYMENT_ENVIRONMENTS
         and not is_postgres_url(master_database_url)
     )
 

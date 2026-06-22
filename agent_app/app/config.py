@@ -22,8 +22,29 @@ def _is_postgres_url(url: str) -> bool:
 
 
 _APP_ENV = os.getenv("APP_ENV", "development")
-_DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./ap_agent.db")
 _SAFE_ENVIRONMENTS = {"production", "prod", "staging", "stage", "demo", "aws"}
+_DATABASE_URL_VALUE = os.getenv("DATABASE_URL", "").strip()
+_MASTER_DATABASE_URL_VALUE = os.getenv("MASTER_DATABASE_URL", "").strip()
+
+if _APP_ENV.strip().lower() in _SAFE_ENVIRONMENTS:
+    if not _DATABASE_URL_VALUE:
+        raise RuntimeError("DATABASE_URL is required in deployment environments.")
+    if not _MASTER_DATABASE_URL_VALUE:
+        raise RuntimeError(
+            "MASTER_DATABASE_URL is required in deployment environments."
+        )
+    if not _is_postgres_url(_DATABASE_URL_VALUE):
+        raise RuntimeError(
+            "DATABASE_URL must be a PostgreSQL URL in deployment environments."
+        )
+    if not _is_postgres_url(_MASTER_DATABASE_URL_VALUE):
+        raise RuntimeError(
+            "MASTER_DATABASE_URL must be a PostgreSQL URL in deployment "
+            "environments."
+        )
+
+_DATABASE_URL = _DATABASE_URL_VALUE or "sqlite:///./ap_agent.db"
+_MASTER_DATABASE_URL = _MASTER_DATABASE_URL_VALUE or _DATABASE_URL
 _SAFE_LOCAL_SCHEMA_DEFAULT = (
     _APP_ENV.strip().lower() not in _SAFE_ENVIRONMENTS
     and not _is_postgres_url(_DATABASE_URL)
@@ -35,6 +56,7 @@ class Settings:
     app_name: str = os.getenv("APP_NAME", "AI AP Agent")
     app_env: str = _APP_ENV
     database_url: str = _DATABASE_URL
+    master_database_url: str = _MASTER_DATABASE_URL
     auto_create_agent_tables: bool = _bool(
         "AUTO_CREATE_AGENT_TABLES",
         _SAFE_LOCAL_SCHEMA_DEFAULT,
@@ -70,8 +92,11 @@ class Settings:
             "",
         )
     api_base_url: str = os.getenv(
-    "API_BASE_URL",
-    "http://localhost:8000",
+        "API_BASE_URL",
+        (
+            "http://127.0.0.1:"
+            + os.getenv("AGENT_API_PORT", "8000")
+        ),
     )
 
     posted_invoice_api_enabled: bool = _bool(
@@ -81,8 +106,20 @@ class Settings:
 
     posted_invoice_api_base_url: str = os.getenv(
         "POSTED_INVOICE_API_BASE_URL",
-        "https://data-ingestion-agent.onrender.com",
+        os.getenv(
+            "MOCK_API_BASE_URL",
+            "http://127.0.0.1:" + os.getenv("SAP_API_PORT", "8001"),
+        ),
     )
+
+    storage_backend: str = os.getenv("STORAGE_BACKEND", "local").lower()
+    s3_bucket_name: str = os.getenv("S3_BUCKET_NAME", "")
+    s3_region: str = os.getenv(
+        "S3_REGION",
+        os.getenv("AWS_REGION", ""),
+    )
+    s3_prefix: str = os.getenv("S3_PREFIX", "ap-demo/")
+    s3_endpoint_url: str = os.getenv("S3_ENDPOINT_URL", "")
 
     posted_invoice_api_username: str = os.getenv(
         "POSTED_INVOICE_API_USERNAME",

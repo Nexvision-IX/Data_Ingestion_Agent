@@ -48,10 +48,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+SAP_API_PORT = int(os.getenv("SAP_API_PORT", "8001"))
 API_BASE_URL = os.getenv(
     "MOCK_API_BASE_URL",
-    "http://127.0.0.1:8001"
-)
+    f"http://127.0.0.1:{SAP_API_PORT}",
+).rstrip("/")
 SAP_USERNAME = os.getenv(
     "SAP_USERNAME",
     ""

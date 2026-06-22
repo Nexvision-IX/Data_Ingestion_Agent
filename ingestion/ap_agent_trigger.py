@@ -8,10 +8,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+AGENT_API_PORT = int(os.getenv("AGENT_API_PORT", "8000"))
 AP_AGENT_BASE_URL = os.getenv(
     "AP_AGENT_BASE_URL",
-    "http://localhost:8000",
-)
+    f"http://127.0.0.1:{AGENT_API_PORT}",
+).rstrip("/")
 
 
 def trigger_ap_agent_process_new(limit: int = 50) -> dict:
