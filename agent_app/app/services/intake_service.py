@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import shutil
+import sys
+import uuid
 from pathlib import Path
 
 from fastapi import UploadFile
@@ -10,6 +12,13 @@ from app.agents.extraction_agent import MockExtractionAgent
 from app.config import settings
 from app.models import Invoice, InvoiceLine, WorkflowEvent
 from app.schemas import ExtractedInvoice
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
+
+from ap_storage import InvoiceArtifactBundle, get_storage_service
 
 
 class IntakeService:
@@ -30,6 +39,7 @@ class IntakeService:
         upload: UploadFile,
         scenario: str | None = None,
     ) -> Invoice:
+        upload_id = uuid.uuid4().hex
         safe_name = Path(
             upload.filename or "invoice.pdf"
         ).name
@@ -37,16 +47,52 @@ class IntakeService:
         with target.open("wb") as handle:
             shutil.copyfileobj(upload.file, handle)
 
-        extracted = self.extractor.extract(
-            file_path=target,
-            scenario=scenario,
-        )
-        return self._persist(
-            extracted,
-            source="UPLOAD",
+        artifact_bundle = InvoiceArtifactBundle(
+            storage=get_storage_service(),
+            upload_id=upload_id,
             original_filename=safe_name,
-            file_path=str(target),
         )
+        artifact_bundle.save_original(
+            target.read_bytes(),
+            content_type=(
+                upload.content_type
+                or "application/octet-stream"
+            ),
+        )
+
+        try:
+            extracted = self.extractor.extract(
+                file_path=target,
+                scenario=scenario,
+            )
+            artifact_bundle.record_invoice_number(
+                extracted.invoice_number
+            )
+            artifact_bundle.save_extracted_json(
+                extracted.model_dump(mode="json")
+            )
+            artifact_bundle.save_processing_metadata(
+                status="success",
+                extra={"processing_flow": "agent_api_mock_extraction"},
+            )
+            return self._persist(
+                extracted,
+                source="UPLOAD",
+                original_filename=safe_name,
+                file_path=str(target),
+            )
+        except Exception as exc:
+            try:
+                artifact_bundle.save_processing_metadata(
+                    status="failed",
+                    extra={
+                        "processing_flow": "agent_api_mock_extraction",
+                        "error_type": type(exc).__name__,
+                    },
+                )
+            except Exception:
+                pass
+            raise
 
     def _persist(
         self,

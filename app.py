@@ -6,6 +6,10 @@ from pathlib import Path
 
 import requests
 import streamlit as st
+from ap_storage import (
+    InvoiceArtifactBundle,
+    get_storage_service,
+)
 from ap_database.agent_monitor_repository import (
     agent_db_available as ap_agent_db_exists,
     load_ap_agent_communications,
@@ -82,15 +86,29 @@ INPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 def save_uploaded_file(uploaded_file):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    unique_id = str(uuid.uuid4())[:8]
+    upload_id = uuid.uuid4().hex
     extension = Path(uploaded_file.name).suffix.lower()
-    internal_filename = f"{timestamp}_{unique_id}{extension}"
+    internal_filename = f"{timestamp}_{upload_id[:8]}{extension}"
     save_path = INPUT_DIR / internal_filename
+    uploaded_bytes = uploaded_file.getvalue()
+
+    artifact_bundle = InvoiceArtifactBundle(
+        storage=get_storage_service(),
+        upload_id=upload_id,
+        original_filename=uploaded_file.name,
+    )
+    artifact_bundle.save_original(
+        uploaded_bytes,
+        content_type=(
+            uploaded_file.type
+            or "application/octet-stream"
+        ),
+    )
 
     with open(save_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
+        f.write(uploaded_bytes)
 
-    return save_path
+    return save_path, artifact_bundle
 
 
 def show_master_reset_blocked_message():
@@ -446,8 +464,13 @@ elif selected_module == "Invoice Processing (PDF/Image)":
         if st.button("Process Invoice"):
             with st.spinner("Running OCR + AI extraction..."):
                 try:
-                    saved_file_path = save_uploaded_file(uploaded_file)
-                    result = process_invoice_pipeline(saved_file_path)
+                    saved_file_path, artifact_bundle = save_uploaded_file(
+                        uploaded_file
+                    )
+                    result = process_invoice_pipeline(
+                        saved_file_path,
+                        artifact_bundle=artifact_bundle,
+                    )
                     st.write(result)
 
                     status = result.get("status", "failed")

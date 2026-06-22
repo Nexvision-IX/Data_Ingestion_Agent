@@ -1,5 +1,9 @@
 import time
+import mimetypes
+import uuid
 from pathlib import Path
+
+from ap_storage import InvoiceArtifactBundle, get_storage_service
 # -----------------------------------
 # STRUCTURED INGESTION
 # -----------------------------------
@@ -66,13 +70,61 @@ def sync_structured_sources():
 # UNSTRUCTURED PIPELINE
 # -----------------------------------
 
-def process_invoice_pipeline(file_path):
+def _create_artifact_bundle(file_path: Path) -> InvoiceArtifactBundle:
+    bundle = InvoiceArtifactBundle(
+        storage=get_storage_service(),
+        upload_id=uuid.uuid4().hex,
+        original_filename=file_path.name,
+    )
+    content_type = (
+        mimetypes.guess_type(file_path.name)[0]
+        or "application/octet-stream"
+    )
+    bundle.save_original(
+        file_path.read_bytes(),
+        content_type=content_type,
+    )
+    return bundle
+
+
+def _save_failure_metadata(
+    bundle: InvoiceArtifactBundle | None,
+    *,
+    step: str,
+    error: str | None = None,
+):
+    if bundle is None:
+        return None
+    details = {"failed_step": step}
+    if error:
+        details["error"] = error
+    try:
+        return bundle.save_processing_metadata(
+            status="failed",
+            extra=details,
+        )
+    except Exception as metadata_error:
+        print(
+            "Processing metadata could not be stored: "
+            f"{type(metadata_error).__name__}"
+        )
+        return None
+
+
+def process_invoice_pipeline(
+    file_path,
+    artifact_bundle: InvoiceArtifactBundle | None = None,
+):
 
     file_path = Path(file_path)
+    bundle = artifact_bundle
 
     total_start = time.time()
 
     try:
+
+        if bundle is None:
+            bundle = _create_artifact_bundle(file_path)
 
         print(
             f"\nStarting OCR Pipeline "
@@ -96,10 +148,19 @@ def process_invoice_pipeline(file_path):
 
         if not text_file_path:
 
+            processing_metadata = _save_failure_metadata(
+                bundle,
+                step="ocr",
+            )
+
             return {
                 "status": "failed",
-                "step": "ocr"
+                "step": "ocr",
+                "processing_metadata": processing_metadata,
             }
+
+        extracted_text = Path(text_file_path).read_text(encoding="utf-8")
+        bundle.save_extracted_text(extracted_text)
 
         # ---------------------------
         # GROQ STEP
@@ -118,10 +179,22 @@ def process_invoice_pipeline(file_path):
 
         if not parsed_json:
 
+            processing_metadata = _save_failure_metadata(
+                bundle,
+                step="groq",
+            )
+
             return {
                 "status": "failed",
-                "step": "groq"
+                "step": "groq",
+                "processing_metadata": processing_metadata,
             }
+
+        bundle.record_invoice_number(parsed_json.get("invoice_number"))
+        bundle.save_extracted_json(parsed_json)
+        processing_metadata = bundle.save_processing_metadata(
+            status="success",
+        )
 
         # ---------------------------
         # TOTAL TIME
@@ -141,14 +214,27 @@ def process_invoice_pipeline(file_path):
 
             "total_time_sec": total_time,
 
-            "parsed_json": parsed_json
+            "parsed_json": parsed_json,
+
+            "artifact_metadata": {
+                **bundle.artifacts,
+                "processing_metadata": processing_metadata,
+                "upload_id": bundle.upload_id,
+            },
         }
 
     except Exception as e:
 
+        processing_metadata = _save_failure_metadata(
+            bundle,
+            step="pipeline",
+            error=type(e).__name__,
+        )
+
         return {
             "status": "failed",
-            "error": str(e)
+            "error": str(e),
+            "processing_metadata": processing_metadata,
         }
 
 

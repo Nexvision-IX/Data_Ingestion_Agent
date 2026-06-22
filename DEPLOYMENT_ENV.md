@@ -59,9 +59,11 @@ S3_PREFIX=ap-demo/
 S3_ENDPOINT_URL=
 ```
 
-Step 15A adds the shared local/S3 storage foundation and deterministic artifact
-key generation. The current upload and OCR workflows do not call it yet; that
-integration belongs to Step 15B. EC2 should receive S3 permissions through an
+Step 15A added the shared local/S3 storage foundation and deterministic artifact
+key generation. Step 15B integrates Streamlit and Agent API uploads with that
+foundation and stores original, extracted text (when OCR runs), structured JSON,
+and processing metadata artifacts. Existing local working files remain available
+for path-based OCR/LLM processing. EC2 should receive S3 permissions through an
 IAM instance role, so static AWS access keys are not required.
 
 `S3_PREFIX` is the root prefix only, such as `ap-demo/`. Invoice artifacts must
@@ -90,8 +92,8 @@ invoice number in `processing_metadata.json` and RDS metadata.
 
 RDS will later store the S3 keys or URIs for the original file, extracted OCR
 text, and extracted structured JSON. RDS must store references and processing
-metadata, not the file blobs themselves. Actual upload/OCR integration and RDS
-artifact-key persistence belong to Step 15B.
+metadata, not the file blobs themselves. Database model and migration work for
+artifact-key persistence remains a later step.
 
 ## Python environment
 

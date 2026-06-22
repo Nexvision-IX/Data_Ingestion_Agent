@@ -1,5 +1,6 @@
 """Shared local/S3 storage foundation for invoice artifacts."""
 
+from ap_storage.artifact_bundle import InvoiceArtifactBundle
 from ap_storage.artifact_keys import (
     extracted_json_key,
     extracted_text_key,
@@ -16,6 +17,7 @@ from ap_storage.storage_service import (
 
 __all__ = [
     "ArtifactMetadata",
+    "InvoiceArtifactBundle",
     "StorageService",
     "StorageSettings",
     "extracted_json_key",
