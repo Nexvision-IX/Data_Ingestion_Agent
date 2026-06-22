@@ -67,7 +67,7 @@ for path-based OCR/LLM processing. EC2 should receive S3 permissions through an
 IAM instance role, so static AWS access keys are not required.
 
 `S3_PREFIX` is the root prefix only, such as `ap-demo/`. Invoice artifacts must
-not be stored together in one flat S3 folder. Step 14B will use this hierarchy:
+not be stored together in one flat S3 folder. Steps 15A-15C use this hierarchy::
 
 ```text
 S3_PREFIX/invoices/{invoice_number_or_upload_id}/original/{original_filename}

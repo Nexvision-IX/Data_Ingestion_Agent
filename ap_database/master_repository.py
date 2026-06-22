@@ -8,7 +8,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, inspect, select, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -21,10 +21,66 @@ from ap_database.master_models import (
     MASTER_TABLE_MODELS,
     MasterBase,
 )
-
+from ap_database.settings import is_postgres_url, settings
 
 ALLOWED_MASTER_TABLES = frozenset(MASTER_TABLE_MODELS)
+class DestructiveMasterOperationBlocked(RuntimeError):
+    """Raised when a destructive master-data operation is blocked."""
 
+
+class MasterSchemaNotInitialized(RuntimeError):
+    """Raised when required master tables are missing at runtime."""
+
+
+SAFE_RUNTIME_ENVIRONMENTS = {
+    "production",
+    "prod",
+    "staging",
+    "stage",
+    "demo",
+    "aws",
+}
+
+
+def require_destructive_master_reset_allowed(operation_name: str) -> None:
+    """Block destructive master-data operations unless explicitly enabled."""
+    if settings.allow_destructive_master_reset:
+        return
+
+    raise DestructiveMasterOperationBlocked(
+        f"Destructive master operation '{operation_name}' is disabled for "
+        f"APP_ENV={settings.app_env!r}. Set "
+        "ALLOW_DESTRUCTIVE_MASTER_RESET=true only for an intentional local/demo "
+        "maintenance action. Keep it false for normal AWS deployment."
+    )
+
+
+def _is_safe_runtime_environment() -> bool:
+    return (
+        settings.app_env.strip().lower() in SAFE_RUNTIME_ENVIRONMENTS
+        or is_postgres_url(settings.master_database_url)
+    )
+
+
+def assert_master_schema_initialized() -> None:
+    """Verify master tables exist without creating them."""
+    engine = get_master_engine()
+    inspector = inspect(engine)
+
+    missing_tables = []
+    for table_name, model in MASTER_TABLE_MODELS.items():
+        table = model.__table__
+        schema = table.schema if engine.dialect.name == "postgresql" else None
+        if not inspector.has_table(table.name, schema=schema):
+            missing_tables.append(table_name)
+
+    if missing_tables:
+        raise MasterSchemaNotInitialized(
+            "Master schema is not initialized. Missing tables: "
+            + ", ".join(sorted(missing_tables))
+            + ". Run `python scripts/init_rds_schema.py` and "
+            "`python scripts/check_rds_schema.py` before starting runtime services."
+        )
 
 def _get_model(table_name: str):
     try:
@@ -150,12 +206,14 @@ def _upsert(
 
 
 def init_master_schema_if_needed() -> None:
-    """Create the configured master schema/tables when explicitly requested."""
+    """Create local SQLite schema, but only verify schema in AWS/PostgreSQL runtime."""
+    if _is_safe_runtime_environment():
+        assert_master_schema_initialized()
+        return
+
     engine = get_master_engine()
 
     if engine.dialect.name == "postgresql":
-        # PostgreSQL uses a dedicated schema. SQLite has no schema namespace
-        # and creates the same compatible table names in its main database.
         with engine.begin() as connection:
             connection.execute(text('CREATE SCHEMA IF NOT EXISTS "master"'))
 
@@ -270,6 +328,8 @@ def upsert_posted_invoice(
 
 
 def _delete_by_primary_key(table_name: str, value: str) -> None:
+    require_destructive_master_reset_allowed(f"delete from {table_name}")
+
     table = _get_model(table_name).__table__
     primary_key = next(iter(table.primary_key.columns))
     statement = delete(table).where(primary_key == value)
@@ -295,6 +355,8 @@ def delete_grn(gr_number: str) -> None:
 
 
 def _clear_table(table_name: str) -> None:
+    require_destructive_master_reset_allowed(f"clear {table_name}")
+
     table = _get_model(table_name).__table__
     with get_master_engine().begin() as connection:
         connection.execute(delete(table))
@@ -318,6 +380,8 @@ def clear_grn_table() -> None:
 
 def keep_latest_rows(table_name: str, keep_count: int) -> None:
     """Keep a deterministic set of the most recently updated rows."""
+    require_destructive_master_reset_allowed(f"keep latest rows in {table_name}")
+
     table = _get_model(table_name).__table__
     normalized_count = max(0, int(keep_count))
     primary_key = next(iter(table.primary_key.columns))
@@ -339,12 +403,14 @@ def keep_latest_rows(table_name: str, keep_count: int) -> None:
 
 def reset_demo_environment() -> dict[str, str]:
     """Clear all master tables in one database transaction."""
+    require_destructive_master_reset_allowed("reset demo environment")
+
     engine = get_master_engine()
     delete_order = (
         "invoice_master",
+        "sap_posted_invoice_master",
         "sap_po_master",
         "sap_grn_master",
-        "sap_posted_invoice_master",
     )
 
     with engine.begin() as connection:

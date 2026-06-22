@@ -459,7 +459,11 @@ def keep_latest_rows(
 
 
 def reset_demo_environment():
+    master_repository.require_destructive_master_reset_allowed(
+        "reset demo environment"
+    )
     init_db()
+    # reset watermark
     # reset watermark
     with open(
         STATE_FILE,

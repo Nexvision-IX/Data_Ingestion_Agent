@@ -234,7 +234,10 @@ def health():
 #------------DELETE INVOICE ----------
 
 @app.delete("/kefron/invoices/{invoice_number}")
-def delete_invoice(invoice_number: str):
+def delete_invoice(
+    invoice_number: str,
+    auth=Depends(verify_kefron),
+):
 
     global INVOICES
 
@@ -272,7 +275,10 @@ def delete_invoice(invoice_number: str):
 #------------DELETE PO ----------
 
 @app.delete("/sap/po/{po_number}")
-def delete_po(po_number: str):
+def delete_po(
+    po_number: str,
+    auth=Depends(verify_sap),
+):
 
     global POS
 
@@ -312,7 +318,10 @@ def delete_po(po_number: str):
 
 @app.delete("/sap/gr/{gr_number}")
 @app.delete("/sap/grn/{gr_number}")
-def delete_grn(gr_number: str):
+def delete_grn(
+    gr_number: str,
+    auth=Depends(verify_sap),
+):
 
     global GRNS
 

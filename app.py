@@ -113,10 +113,10 @@ def save_uploaded_file(uploaded_file):
 
 def show_master_reset_blocked_message():
     st.error(
-        "Destructive master reset/clear operations are disabled for this "
+        "Destructive master-data operations are disabled for this "
         "environment or database. Set "
         "ALLOW_DESTRUCTIVE_MASTER_RESET=true only when an intentional "
-        "reset is required."
+        "maintenance action is required."
     )
 
 
@@ -1082,13 +1082,22 @@ elif selected_module == "Admin Data Manager":
         key="delete_invoice_btn"
     ):
 
-        delete_invoice(
-            delete_invoice_no
-        )
+        if not database_settings.allow_destructive_master_reset:
+            show_master_reset_blocked_message()
+        elif not delete_invoice_no:
+            st.warning("Enter an invoice number first.")
+        else:
+            try:
+                delete_invoice(
+                    delete_invoice_no
+                )
 
-        st.success(
-            "Invoice deleted."
-        )
+                st.success(
+                    "Invoice deleted."
+                )
+
+            except Exception as e:
+                st.exception(e)
 
     delete_posted_invoice_no = st.text_input(
         "Posted Invoice Number",
@@ -1100,13 +1109,22 @@ elif selected_module == "Admin Data Manager":
         key="delete_posted_invoice_btn"
     ):
 
-        delete_posted_invoice(
-            delete_posted_invoice_no
-        )
+        if not database_settings.allow_destructive_master_reset:
+            show_master_reset_blocked_message()
+        elif not delete_posted_invoice_no:
+            st.warning("Enter a posted invoice number first.")
+        else:
+            try:
+                delete_posted_invoice(
+                    delete_posted_invoice_no
+                )
 
-        st.success(
-            "Posted invoice deleted."
-        )
+                st.success(
+                    "Posted invoice deleted."
+                )
+
+            except Exception as e:
+                st.exception(e)
 
     delete_po_no = st.text_input(
         "PO Number",
@@ -1118,13 +1136,22 @@ elif selected_module == "Admin Data Manager":
         key="delete_po_btn"
     ):
 
-        delete_po(
-            delete_po_no
-        )
+        if not database_settings.allow_destructive_master_reset:
+            show_master_reset_blocked_message()
+        elif not delete_po_no:
+            st.warning("Enter a PO number first.")
+        else:
+            try:
+                delete_po(
+                    delete_po_no
+                )
 
-        st.success(
-            "PO deleted."
-        )
+                st.success(
+                    "PO deleted."
+                )
+
+            except Exception as e:
+                st.exception(e)
 
     delete_grn_no = st.text_input(
         "GRN Number",
@@ -1136,16 +1163,22 @@ elif selected_module == "Admin Data Manager":
         key="delete_grn_btn"
     ):
 
-        delete_grn(
-            delete_grn_no
-        )
+        if not database_settings.allow_destructive_master_reset:
+            show_master_reset_blocked_message()
+        elif not delete_grn_no:
+            st.warning("Enter a GRN number first.")
+        else:
+            try:
+                delete_grn(
+                    delete_grn_no
+                )
 
-        st.success(
-            "GRN deleted."
-        )
-    # Your delete invoice code
-    # Your delete po code
-    # Your delete grn code
+                st.success(
+                    "GRN deleted."
+                )
+
+            except Exception as e:
+                st.exception(e)
 
     st.divider()
 
@@ -1253,13 +1286,20 @@ elif selected_module == "Admin Data Manager":
         "Apply Cleanup"
     ):
 
-        keep_latest_rows(
+        if not database_settings.allow_destructive_master_reset:
+            show_master_reset_blocked_message()
+        else:
+            try:
+                keep_latest_rows(
 
-            selected_table,
+                    selected_table,
 
-            keep_count
-        )
+                    keep_count
+                )
 
-        st.success(
-            "Cleanup completed."
-        )
+                st.success(
+                    "Cleanup completed."
+                )
+
+            except Exception as e:
+                st.exception(e)
