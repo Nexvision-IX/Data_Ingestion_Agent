@@ -59,10 +59,10 @@ S3_PREFIX=ap-demo/
 S3_ENDPOINT_URL=
 ```
 
-S3 artifact upload/download is not implemented in this step. These variables
-prepare deployment configuration and validation only. EC2 should receive S3
-permissions through an IAM instance role; static AWS access keys are not
-required.
+Step 15A adds the shared local/S3 storage foundation and deterministic artifact
+key generation. The current upload and OCR workflows do not call it yet; that
+integration belongs to Step 15B. EC2 should receive S3 permissions through an
+IAM instance role, so static AWS access keys are not required.
 
 `S3_PREFIX` is the root prefix only, such as `ap-demo/`. Invoice artifacts must
 not be stored together in one flat S3 folder. Step 14B will use this hierarchy:
@@ -90,8 +90,8 @@ invoice number in `processing_metadata.json` and RDS metadata.
 
 RDS will later store the S3 keys or URIs for the original file, extracted OCR
 text, and extracted structured JSON. RDS must store references and processing
-metadata, not the file blobs themselves. The actual S3 upload/download and RDS
-artifact-key integration belongs to Step 14B.
+metadata, not the file blobs themselves. Actual upload/OCR integration and RDS
+artifact-key persistence belong to Step 15B.
 
 ## Python environment
 
