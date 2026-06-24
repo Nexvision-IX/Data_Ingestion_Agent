@@ -29,7 +29,16 @@ class APValidationEngine:
         results: list[RuleResult] = []
         po = context.get("po")
         vendor = context.get("vendor")
-        grns = context.get("grns", [])
+        from app.services.grn_status_control import (
+            GRNStatusControl,
+            VALID_GRN_STATUSES,
+            normalize_grn,
+        )
+
+        grns = [
+            normalize_grn(item)
+            for item in context.get("grns", [])
+        ]
         history = context.get("invoice_history", [])
 
         results.append(
@@ -141,6 +150,10 @@ class APValidationEngine:
             )
         )
 
+        results.append(
+            GRNStatusControl().evaluate(grns)
+        )
+
         grn_failures: list[str] = []
         quantity_failures: list[dict[str, Any]] = []
         price_failures: list[dict[str, Any]] = []
@@ -158,7 +171,7 @@ class APValidationEngine:
                 item
                 for item in grns
                 if item.get("po_item") == item_key
-                and item.get("status") == "POSTED"
+                and item.get("status") in VALID_GRN_STATUSES
             ]
             received_quantity = sum(
                 float(item.get("received_quantity", 0))
@@ -223,10 +236,10 @@ class APValidationEngine:
                 not grn_failures,
                 "ERROR",
                 (
-                    "Posted GRN found for every line."
+                    "Valid posted or partial GRN found for every line."
                     if not grn_failures
                     else (
-                        "Missing posted GRN for items: "
+                        "Missing valid GRN for items: "
                         f"{', '.join(grn_failures)}."
                     )
                 ),
@@ -241,7 +254,7 @@ class APValidationEngine:
                 not quantity_failures,
                 "ERROR",
                 (
-                    "Invoice quantities are covered by posted receipts."
+                    "Invoice quantities are covered by valid receipts."
                     if not quantity_failures
                     else (
                         "One or more invoice quantities exceed posted "

@@ -11,6 +11,7 @@ from sqlalchemy.engine import Connection
 
 from app.integrations.sap.base import SAPGateway
 from app.models import Invoice
+from app.services.grn_status_control import normalize_grn_status
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
@@ -161,6 +162,8 @@ class APMasterGateway(SAPGateway):
 
         for row in rows:
             raw_items = _load_items(row.get("items_json"))
+            raw_status = row.get("gr_status")
+            normalized_status = normalize_grn_status(raw_status)
             for idx, item in enumerate(raw_items, start=1):
                 line_no = item.get("line_no") or idx
                 output.append(
@@ -169,8 +172,8 @@ class APMasterGateway(SAPGateway):
                         "po_number": row.get("po_number"),
                         "po_item": f"{int(line_no):05d}",
                         "received_quantity": float(item.get("qty") or 0),
-                        "status": "POSTED",
-                        "raw_status": row.get("gr_status"),
+                        "status": normalized_status,
+                        "raw_status": raw_status,
                     }
                 )
 

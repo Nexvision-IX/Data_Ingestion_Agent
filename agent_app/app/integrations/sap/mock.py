@@ -9,6 +9,7 @@ from typing import Any
 from app.config import settings
 from app.integrations.sap.base import SAPGateway
 from app.models import Invoice
+from app.services.grn_status_control import normalize_grn
 
 
 _LOCK = threading.Lock()
@@ -60,7 +61,7 @@ class MockSAPGateway(SAPGateway):
             None,
         )
         grns = [
-            item
+            normalize_grn(item)
             for item in data["grns"]
             if invoice.po_number
             and item["po_number"] == invoice.po_number

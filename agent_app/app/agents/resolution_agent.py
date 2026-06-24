@@ -23,6 +23,10 @@ RESOLUTION_MAP = {
     "GRN_MISSING": (
         "Ask the requester or goods receiver to post the missing GRN."
     ),
+    "GRN_STATUS_INVALID": (
+        "Ask the receiving or requester team to confirm or correct the "
+        "GRN status before invoice posting."
+    ),
     "QUANTITY_MISMATCH": (
         "Ask the requester to confirm receipt quantity and post or "
         "correct the GRN."
