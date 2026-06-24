@@ -69,6 +69,9 @@ class Settings:
     mock_sap_data_path: Path = Path(os.getenv("MOCK_SAP_DATA_PATH", "./data/mock_sap.json"))
     sap_provider: str = os.getenv("SAP_PROVIDER", "mock").lower()
     price_tolerance_percent: float = float(os.getenv("PRICE_TOLERANCE_PERCENT", "2.0"))
+    financial_tolerance_amount: float = float(
+        os.getenv("FINANCIAL_TOLERANCE_AMOUNT", "0.01")
+    )
     recheck_max_attempts: int = int(os.getenv("RECHECK_MAX_ATTEMPTS", "3"))
     auto_post_clean_invoices: bool = _bool("AUTO_POST_CLEAN_INVOICES", True)
 

@@ -35,6 +35,10 @@ RESOLUTION_MAP = {
         "Stop processing and ask an AP reviewer to verify the possible "
         "duplicate."
     ),
+    "FINANCIAL_MISMATCH": (
+        "Stop processing and ask AP to verify invoice line calculations, "
+        "subtotal, tax, and document total."
+    ),
     "PAYMENT_TERMS_MISMATCH": (
         "Ask AP or Procurement to confirm the approved payment terms."
     ),

@@ -32,6 +32,7 @@ from app.services.serializers import (
     invoice_payload,
 )
 from app.services.duplicate_invoice_control import DuplicateInvoiceControl
+from app.services.invoice_financial_control import InvoiceFinancialControl
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -111,6 +112,9 @@ class APOrchestrator:
         )
         results.extend(
             DuplicateInvoiceControl(self.db).evaluate(invoice)
+        )
+        results.extend(
+            InvoiceFinancialControl().evaluate(invoice)
         )
 
         for result in results:
