@@ -33,6 +33,7 @@ from app.services.serializers import (
 )
 from app.services.duplicate_invoice_control import DuplicateInvoiceControl
 from app.services.invoice_financial_control import InvoiceFinancialControl
+from app.services.po_grn_consumption_control import PO_GRNConsumptionControl
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -115,6 +116,12 @@ class APOrchestrator:
         )
         results.extend(
             InvoiceFinancialControl().evaluate(invoice)
+        )
+        results.extend(
+            PO_GRNConsumptionControl(self.db).evaluate(
+                invoice,
+                context,
+            )
         )
 
         for result in results:

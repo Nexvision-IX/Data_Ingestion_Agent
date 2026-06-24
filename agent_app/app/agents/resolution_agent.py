@@ -47,6 +47,10 @@ RESOLUTION_MAP = {
         "Stop processing and ask AP to verify invoice line calculations, "
         "subtotal, tax, and document total."
     ),
+    "PO_GRN_CONSUMPTION_EXCEEDED": (
+        "Ask AP, Procurement, and Receiving to verify prior invoices, "
+        "remaining PO balance, and GRN consumption before posting."
+    ),
     "PAYMENT_TERMS_MISMATCH": (
         "Ask AP or Procurement to confirm the approved payment terms."
     ),
