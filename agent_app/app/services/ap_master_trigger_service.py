@@ -438,6 +438,7 @@ class APMasterTriggerService:
         ),
     ) -> Invoice:
         vendor_name = row.get("vendor_name") or "Unknown Vendor"
+        raw_json = _load_json(row.get("raw_json"), {})
 
         invoice = Invoice(
             source="AP_MASTER_IMPORT",
@@ -452,7 +453,11 @@ class APMasterTriggerService:
             subtotal=float(row.get("document_subtotal") or 0),
             tax_amount=float(row.get("tax_amount") or 0),
             total_amount=float(row.get("document_total") or 0),
-            payment_terms=None,
+            payment_terms=(
+                raw_json.get("payment_terms")
+                if isinstance(raw_json, dict)
+                else None
+            ),
             status="EXTRACTED",
             extraction_confidence=1.0,
             extraction_raw={
@@ -464,10 +469,7 @@ class APMasterTriggerService:
                 "vat_percent": _json_compatible(
                     row.get("vat_percent")
                 ),
-                "raw_json": _load_json(
-                    row.get("raw_json"),
-                    _json_compatible(row),
-                ),
+                "raw_json": raw_json or _json_compatible(row),
             },
         )
 
@@ -575,6 +577,7 @@ class APMasterTriggerService:
 
     def _refresh_agent_invoice(self, invoice: Invoice, row: dict) -> None:
         vendor_name = row.get("vendor_name") or "Unknown Vendor"
+        raw_json = _load_json(row.get("raw_json"), {})
         invoice.source = "AP_MASTER_IMPORT"
         invoice.original_filename = f"{row.get('invoice_number')}.json"
         invoice.file_path = "master_database"
@@ -587,7 +590,11 @@ class APMasterTriggerService:
         invoice.subtotal = float(row.get("document_subtotal") or 0)
         invoice.tax_amount = float(row.get("tax_amount") or 0)
         invoice.total_amount = float(row.get("document_total") or 0)
-        invoice.payment_terms = None
+        invoice.payment_terms = (
+            raw_json.get("payment_terms")
+            if isinstance(raw_json, dict)
+            else None
+        )
         invoice.status = "EXTRACTED"
         invoice.extraction_confidence = 1.0
         invoice.extraction_raw = {
@@ -599,10 +606,7 @@ class APMasterTriggerService:
             "vat_percent": _json_compatible(
                 row.get("vat_percent")
             ),
-            "raw_json": _load_json(
-                row.get("raw_json"),
-                _json_compatible(row),
-            ),
+            "raw_json": raw_json or _json_compatible(row),
         }
         self._add_invoice_lines(invoice, row)
 

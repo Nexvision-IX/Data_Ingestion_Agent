@@ -47,6 +47,18 @@ def _load_items(items_json: Any) -> list[dict[str, Any]]:
         return []
 
 
+def _load_object(value: Any) -> dict[str, Any]:
+    if not value:
+        return {}
+    if isinstance(value, dict):
+        return value
+    try:
+        data = json.loads(value)
+        return data if isinstance(data, dict) else {}
+    except (TypeError, ValueError):
+        return {}
+
+
 class APMasterGateway(SAPGateway):
     """Read AP master context through the configured shared database engine."""
 
@@ -106,6 +118,7 @@ class APMasterGateway(SAPGateway):
             table.c.vat_percent,
             table.c.po_status,
             table.c.items_json,
+            table.c.raw_json,
         ).where(table.c.po_number == po_number)
         row = connection.execute(statement).mappings().first()
 
@@ -128,6 +141,7 @@ class APMasterGateway(SAPGateway):
 
         vendor_name = row.get("vendor_name") or ""
         raw_status = row.get("po_status")
+        raw_json = _load_object(row.get("raw_json"))
         return {
             "po_number": row.get("po_number"),
             "vendor_number": _vendor_key(vendor_name),
@@ -145,7 +159,7 @@ class APMasterGateway(SAPGateway):
                 if row.get("vat_percent") is not None
                 else None
             ),
-            "payment_terms": None,
+            "payment_terms": raw_json.get("payment_terms"),
             "status": normalize_po_status(raw_status),
             "raw_status": raw_status,
             "items": items,

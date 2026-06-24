@@ -39,6 +39,7 @@ from app.services.po_grn_consumption_ledger_service import (
     POGRNConsumptionLedgerService,
 )
 from app.services.tax_validation_control import TaxValidationControl
+from app.services.payment_terms_control import PaymentTermsControl
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -133,6 +134,9 @@ class APOrchestrator:
         )
         results.extend(
             TaxValidationControl().evaluate(invoice, context)
+        )
+        results.extend(
+            PaymentTermsControl().evaluate(invoice, context)
         )
 
         for result in results:

@@ -68,7 +68,8 @@ RESOLUTION_MAP = {
         "details before production auto-posting."
     ),
     "PAYMENT_TERMS_MISMATCH": (
-        "Ask AP or Procurement to confirm the approved payment terms."
+        "Ask AP or Procurement to confirm approved payment terms and "
+        "due-date treatment before posting."
     ),
     "OTHER_EXCEPTION": (
         "Route to an AP reviewer for manual investigation."
