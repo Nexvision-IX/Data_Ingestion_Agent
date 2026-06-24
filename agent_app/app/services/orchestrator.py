@@ -31,6 +31,7 @@ from app.services.serializers import (
     exception_payload,
     invoice_payload,
 )
+from app.services.duplicate_invoice_control import DuplicateInvoiceControl
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -107,6 +108,9 @@ class APOrchestrator:
         results = self.validator.validate(
             invoice,
             context,
+        )
+        results.extend(
+            DuplicateInvoiceControl(self.db).evaluate(invoice)
         )
 
         for result in results:
