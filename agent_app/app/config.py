@@ -72,6 +72,9 @@ class Settings:
     financial_tolerance_amount: float = float(
         os.getenv("FINANCIAL_TOLERANCE_AMOUNT", "0.01")
     )
+    tax_tolerance_amount: float = float(
+        os.getenv("TAX_TOLERANCE_AMOUNT", "0.01")
+    )
     max_invoice_age_days: int = int(
         os.getenv("MAX_INVOICE_AGE_DAYS", "365")
     )

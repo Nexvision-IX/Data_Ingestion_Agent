@@ -59,6 +59,14 @@ RESOLUTION_MAP = {
         "Ask AP, Procurement, and Receiving to verify invoice, PO, and "
         "GRN dates and accounting-period treatment before posting."
     ),
+    "TAX_MISMATCH": (
+        "Ask AP, Tax, and Procurement to verify tax rate, tax amount, "
+        "tax code, and PO tax treatment before posting."
+    ),
+    "VENDOR_TAX_DATA_INCOMPLETE": (
+        "Ask Vendor Master or AP Tax to complete vendor tax registration "
+        "details before production auto-posting."
+    ),
     "PAYMENT_TERMS_MISMATCH": (
         "Ask AP or Procurement to confirm the approved payment terms."
     ),

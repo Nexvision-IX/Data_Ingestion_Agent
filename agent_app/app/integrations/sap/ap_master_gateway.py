@@ -102,6 +102,8 @@ class APMasterGateway(SAPGateway):
             table.c.vendor_name,
             cast(table.c.po_date, String).label("po_date"),
             table.c.currency,
+            table.c.tax_amount,
+            table.c.vat_percent,
             table.c.po_status,
             table.c.items_json,
         ).where(table.c.po_number == po_number)
@@ -133,6 +135,16 @@ class APMasterGateway(SAPGateway):
             "po_date": row.get("po_date"),
             "company_code": "1000",
             "currency": row.get("currency"),
+            "tax_amount": (
+                float(row["tax_amount"])
+                if row.get("tax_amount") is not None
+                else None
+            ),
+            "vat_percent": (
+                float(row["vat_percent"])
+                if row.get("vat_percent") is not None
+                else None
+            ),
             "payment_terms": None,
             "status": normalize_po_status(raw_status),
             "raw_status": raw_status,

@@ -461,6 +461,9 @@ class APMasterTriggerService:
                     row.get("last_modified")
                 ),
                 "payment_status": row.get("payment_status"),
+                "vat_percent": _json_compatible(
+                    row.get("vat_percent")
+                ),
                 "raw_json": _load_json(
                     row.get("raw_json"),
                     _json_compatible(row),
@@ -593,6 +596,9 @@ class APMasterTriggerService:
                 row.get("last_modified")
             ),
             "payment_status": row.get("payment_status"),
+            "vat_percent": _json_compatible(
+                row.get("vat_percent")
+            ),
             "raw_json": _load_json(
                 row.get("raw_json"),
                 _json_compatible(row),

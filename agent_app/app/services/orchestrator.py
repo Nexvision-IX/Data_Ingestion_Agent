@@ -38,6 +38,7 @@ from app.services.date_sequence_control import DateSequenceControl
 from app.services.po_grn_consumption_ledger_service import (
     POGRNConsumptionLedgerService,
 )
+from app.services.tax_validation_control import TaxValidationControl
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -129,6 +130,9 @@ class APOrchestrator:
         )
         results.extend(
             DateSequenceControl().evaluate(invoice, context)
+        )
+        results.extend(
+            TaxValidationControl().evaluate(invoice, context)
         )
 
         for result in results:

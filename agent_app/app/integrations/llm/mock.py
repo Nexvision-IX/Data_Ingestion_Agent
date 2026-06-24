@@ -43,6 +43,15 @@ RULE_TO_CATEGORY = {
     "DATE-003": ("DATE_POLICY_EXCEPTION", "HIGH", "AP"),
     "DATE-004": ("DATE_POLICY_EXCEPTION", "HIGH", "AP"),
     "DATE-005": ("DATE_POLICY_EXCEPTION", "HIGH", "AP"),
+    "TAX-001": ("TAX_MISMATCH", "HIGH", "AP"),
+    "TAX-002": ("TAX_MISMATCH", "HIGH", "AP"),
+    "TAX-003": ("TAX_MISMATCH", "HIGH", "AP"),
+    "TAX-004": ("TAX_MISMATCH", "HIGH", "AP"),
+    "TAX-005": (
+        "VENDOR_TAX_DATA_INCOMPLETE",
+        "MEDIUM",
+        "VENDOR_MASTER",
+    ),
     "AP-010": ("PAYMENT_TERMS_MISMATCH", "MEDIUM", "AP"),
 }
 
