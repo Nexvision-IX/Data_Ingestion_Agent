@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, JSON, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -48,6 +49,7 @@ class Invoice(Base):
     communications: Mapped[list["Communication"]] = relationship(back_populates="invoice", cascade="all, delete-orphan")
     events: Mapped[list["WorkflowEvent"]] = relationship(back_populates="invoice", cascade="all, delete-orphan")
     postings: Mapped[list["PostingAttempt"]] = relationship(back_populates="invoice", cascade="all, delete-orphan")
+    consumption_ledger: Mapped[list["POGRNConsumptionLedger"]] = relationship(back_populates="invoice")
 
 
 class InvoiceLine(Base):
@@ -145,3 +147,41 @@ class PostingAttempt(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
     invoice: Mapped["Invoice"] = relationship(back_populates="postings")
+
+
+class POGRNConsumptionLedger(Base):
+    __tablename__ = "po_grn_consumption_ledger"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_id)
+    invoice_id: Mapped[str] = mapped_column(
+        ForeignKey("invoices.id"),
+        index=True,
+    )
+    invoice_number: Mapped[str] = mapped_column(String(100), index=True)
+    po_number: Mapped[str] = mapped_column(String(100), index=True)
+    po_item: Mapped[str] = mapped_column(String(20), index=True)
+    active_key: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+        unique=True,
+    )
+    grn_number: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+        index=True,
+    )
+    quantity: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    amount: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    ledger_status: Mapped[str] = mapped_column(String(30), index=True)
+    source: Mapped[str] = mapped_column(String(40), default="AP_AGENT")
+    reason: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=_now,
+        onupdate=_now,
+    )
+
+    invoice: Mapped["Invoice"] = relationship(
+        back_populates="consumption_ledger"
+    )

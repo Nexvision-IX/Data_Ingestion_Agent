@@ -10,11 +10,19 @@ from sqlalchemy import String, cast, or_, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from app.models import Invoice, InvoiceLine, PostingAttempt
+from app.models import (
+    Invoice,
+    InvoiceLine,
+    POGRNConsumptionLedger,
+    PostingAttempt,
+)
 from app.rules.validation import RuleResult
 from app.services.grn_status_control import (
     VALID_GRN_STATUSES,
     normalize_grn,
+)
+from app.services.po_grn_consumption_ledger_service import (
+    ACTIVE_LEDGER_STATUSES,
 )
 
 
@@ -281,6 +289,38 @@ class PO_GRNConsumptionControl:
     ) -> dict[str, dict[str, Any]]:
         consumption: dict[str, dict[str, Any]] = {}
         counted_invoice_keys = set()
+        ledger_invoice_ids = set()
+        ledger_invoice_keys = set()
+
+        ledger_rows = self.db.scalars(
+            select(POGRNConsumptionLedger).where(
+                POGRNConsumptionLedger.po_number == invoice.po_number,
+                POGRNConsumptionLedger.invoice_id != invoice.id,
+            )
+        ).all()
+        for ledger_row in ledger_rows:
+            ledger_invoice_ids.add(ledger_row.invoice_id)
+            ledger_invoice_keys.add(
+                _invoice_key(ledger_row.invoice_number)
+            )
+            if ledger_row.ledger_status not in ACTIVE_LEDGER_STATUSES:
+                continue
+            counted_invoice_keys.add(
+                _invoice_key(ledger_row.invoice_number)
+            )
+            self._add_consumption(
+                consumption,
+                item_key=_po_item(ledger_row.po_item),
+                quantity=_decimal(ledger_row.quantity) or Decimal("0"),
+                amount=_decimal(ledger_row.amount) or Decimal("0"),
+                source={
+                    "source": "po_grn_consumption_ledger",
+                    "ledger_id": ledger_row.id,
+                    "invoice_id": ledger_row.invoice_id,
+                    "invoice_number": ledger_row.invoice_number,
+                    "status": ledger_row.ledger_status,
+                },
+            )
 
         statement = (
             select(Invoice, InvoiceLine)
@@ -302,6 +342,12 @@ class PO_GRNConsumptionControl:
 
         seen_line_ids = set()
         for prior_invoice, line in rows:
+            if (
+                prior_invoice.id in ledger_invoice_ids
+                or _invoice_key(prior_invoice.invoice_number)
+                in ledger_invoice_keys
+            ):
+                continue
             if line.id in seen_line_ids:
                 continue
             seen_line_ids.add(line.id)
@@ -339,7 +385,10 @@ class PO_GRNConsumptionControl:
             row_invoice_key = _invoice_key(row["invoice_number"])
             if row_invoice_key == _invoice_key(invoice.invoice_number):
                 continue
-            if row_invoice_key in counted_invoice_keys:
+            if (
+                row_invoice_key in counted_invoice_keys
+                or row_invoice_key in ledger_invoice_keys
+            ):
                 continue
             if str(row["posting_status"] or "").upper() != "POSTED":
                 continue

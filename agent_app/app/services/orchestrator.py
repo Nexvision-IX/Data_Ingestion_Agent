@@ -35,6 +35,9 @@ from app.services.duplicate_invoice_control import DuplicateInvoiceControl
 from app.services.invoice_financial_control import InvoiceFinancialControl
 from app.services.po_grn_consumption_control import PO_GRNConsumptionControl
 from app.services.date_sequence_control import DateSequenceControl
+from app.services.po_grn_consumption_ledger_service import (
+    POGRNConsumptionLedgerService,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -171,11 +174,19 @@ class APOrchestrator:
                     "controls."
                 ),
             )
+            POGRNConsumptionLedgerService(self.db).reserve(
+                invoice,
+                context,
+            )
 
             if settings.auto_post_clean_invoices:
                 self._post(invoice, context)
 
         else:
+            POGRNConsumptionLedgerService(self.db).release(
+                invoice,
+                "Invoice entered exception workflow.",
+            )
             self._handle_exception(invoice, results)
 
         self.db.commit()
@@ -713,15 +724,39 @@ class APOrchestrator:
                 "PostingService",
                 attempt.message,
             )
+            POGRNConsumptionLedgerService(self.db).release(
+                invoice,
+                "Posting pre-check failed.",
+            )
 
             return
 
         invoice.status = "POSTING_IN_PROGRESS"
 
-        result = self.posting.post_invoice(
-            invoice,
-            live_check["context"],
-        )
+        try:
+            result = self.posting.post_invoice(
+                invoice,
+                live_check["context"],
+            )
+        except Exception as exc:
+            invoice.status = "POSTING_FAILED"
+            attempt = PostingAttempt(
+                invoice_id=invoice.id,
+                status="FAILED",
+                message=f"Posting raised an exception: {exc}",
+            )
+            self.db.add(attempt)
+            self._event(
+                invoice,
+                "POSTING_FAILED",
+                "PostingService",
+                attempt.message,
+            )
+            POGRNConsumptionLedgerService(self.db).release(
+                invoice,
+                "Posting raised an exception.",
+            )
+            return
 
         attempt = PostingAttempt(
             invoice_id=invoice.id,
@@ -761,8 +796,14 @@ class APOrchestrator:
         )
 
         if result["success"]:
+            POGRNConsumptionLedgerService(self.db).consume(invoice)
             self._publish_posted_invoice(
                 invoice,
                 result.get("sap_document_number"),
                 result.get("message"),
+            )
+        else:
+            POGRNConsumptionLedgerService(self.db).release(
+                invoice,
+                "Posting attempt failed.",
             )

@@ -21,6 +21,9 @@ from app.models import (
     ValidationResult,
     WorkflowEvent,
 )
+from app.services.po_grn_consumption_ledger_service import (
+    POGRNConsumptionLedgerService,
+)
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
@@ -274,6 +277,10 @@ class APMasterTriggerService:
         self._ensure_not_posted(invoice)
         audit_summary = self._workflow_audit_summary(invoice)
         reset_counts = self._reset_workflow_data(invoice)
+        released_rows = POGRNConsumptionLedgerService(self.db).release(
+            invoice,
+            "Invoice reset for controlled reprocessing.",
+        )
         self._refresh_agent_invoice(invoice, row)
         self.db.add(
             WorkflowEvent(
@@ -300,6 +307,7 @@ class APMasterTriggerService:
                         "previous_latest_message"
                     ],
                     "reset_counts": reset_counts,
+                    "released_ledger_row_count": len(released_rows),
                     "master_tables_modified": False,
                 },
             )
@@ -319,6 +327,10 @@ class APMasterTriggerService:
                 ) from exc
 
             failed_invoice.status = "REPROCESS_FAILED"
+            POGRNConsumptionLedgerService(self.db).release(
+                failed_invoice,
+                "Reprocessing failed.",
+            )
             self.db.add(
                 WorkflowEvent(
                     invoice_id=failed_invoice.id,

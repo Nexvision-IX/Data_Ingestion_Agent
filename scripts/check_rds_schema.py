@@ -40,6 +40,7 @@ REQUIRED_AGENT_TABLES = {
     "communications",
     "posting_attempts",
     "workflow_events",
+    "po_grn_consumption_ledger",
 }
 
 
