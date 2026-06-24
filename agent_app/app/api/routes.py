@@ -1,5 +1,12 @@
 from __future__ import annotations
-from app.services.ap_master_trigger_service import APMasterTriggerService
+from app.services.ap_master_trigger_service import (
+    APMasterTriggerService,
+    AgentInvoiceNotFoundError,
+    DuplicateAgentInvoiceError,
+    MasterInvoiceNotFoundError,
+    ReprocessExecutionError,
+    UnsafeReprocessStatusError,
+)
 from fastapi import (
     APIRouter,
     Depends,
@@ -234,6 +241,44 @@ def process_new_ap_master_invoices(
             status_code=500,
             detail=str(exc),
         ) from exc
+
+
+@router.post("/integrations/ap-master/reprocess/{invoice_number}")
+def reprocess_ap_master_invoice(
+    invoice_number: str,
+    db: Session = Depends(get_db),
+):
+    try:
+        return APMasterTriggerService(db).reprocess_invoice(
+            invoice_number=invoice_number
+        )
+    except MasterInvoiceNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+    except (
+        AgentInvoiceNotFoundError,
+        UnsafeReprocessStatusError,
+        DuplicateAgentInvoiceError,
+    ) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
+    except ReprocessExecutionError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Reprocessing failed: {exc}",
+        ) from exc
+
+
 @router.post("/admin/reset-demo")
 def reset_demo(
     db: Session = Depends(get_db),
