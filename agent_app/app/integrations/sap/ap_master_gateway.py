@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import String, cast, func, select
 from sqlalchemy.engine import Connection
 
 from app.integrations.sap.base import SAPGateway
@@ -100,6 +100,7 @@ class APMasterGateway(SAPGateway):
         statement = select(
             table.c.po_number,
             table.c.vendor_name,
+            cast(table.c.po_date, String).label("po_date"),
             table.c.currency,
             table.c.po_status,
             table.c.items_json,
@@ -129,6 +130,7 @@ class APMasterGateway(SAPGateway):
             "po_number": row.get("po_number"),
             "vendor_number": _vendor_key(vendor_name),
             "vendor_name": vendor_name,
+            "po_date": row.get("po_date"),
             "company_code": "1000",
             "currency": row.get("currency"),
             "payment_terms": None,
@@ -150,6 +152,7 @@ class APMasterGateway(SAPGateway):
             select(
                 table.c.gr_number,
                 table.c.po_number,
+                cast(table.c.gr_date, String).label("gr_date"),
                 table.c.gr_status,
                 table.c.items_json,
             )
@@ -169,6 +172,7 @@ class APMasterGateway(SAPGateway):
                     {
                         "grn_number": row.get("gr_number"),
                         "po_number": row.get("po_number"),
+                        "gr_date": row.get("gr_date"),
                         "po_item": f"{int(line_no):05d}",
                         "received_quantity": float(item.get("qty") or 0),
                         "status": normalized_status,

@@ -72,6 +72,9 @@ class Settings:
     financial_tolerance_amount: float = float(
         os.getenv("FINANCIAL_TOLERANCE_AMOUNT", "0.01")
     )
+    max_invoice_age_days: int = int(
+        os.getenv("MAX_INVOICE_AGE_DAYS", "365")
+    )
     recheck_max_attempts: int = int(os.getenv("RECHECK_MAX_ATTEMPTS", "3"))
     auto_post_clean_invoices: bool = _bool("AUTO_POST_CLEAN_INVOICES", True)
 

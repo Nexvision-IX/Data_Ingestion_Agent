@@ -34,6 +34,7 @@ from app.services.serializers import (
 from app.services.duplicate_invoice_control import DuplicateInvoiceControl
 from app.services.invoice_financial_control import InvoiceFinancialControl
 from app.services.po_grn_consumption_control import PO_GRNConsumptionControl
+from app.services.date_sequence_control import DateSequenceControl
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -122,6 +123,9 @@ class APOrchestrator:
                 invoice,
                 context,
             )
+        )
+        results.extend(
+            DateSequenceControl().evaluate(invoice, context)
         )
 
         for result in results:

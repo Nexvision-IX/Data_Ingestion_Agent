@@ -55,6 +55,10 @@ RESOLUTION_MAP = {
         "Ask AP, Procurement, and Receiving to verify prior invoices, "
         "remaining PO balance, and GRN consumption before posting."
     ),
+    "DATE_POLICY_EXCEPTION": (
+        "Ask AP, Procurement, and Receiving to verify invoice, PO, and "
+        "GRN dates and accounting-period treatment before posting."
+    ),
     "PAYMENT_TERMS_MISMATCH": (
         "Ask AP or Procurement to confirm the approved payment terms."
     ),
