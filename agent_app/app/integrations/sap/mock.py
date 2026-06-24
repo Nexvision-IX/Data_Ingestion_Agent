@@ -10,6 +10,7 @@ from app.config import settings
 from app.integrations.sap.base import SAPGateway
 from app.models import Invoice
 from app.services.grn_status_control import normalize_grn
+from app.services.po_status_control import normalize_po
 
 
 _LOCK = threading.Lock()
@@ -44,14 +45,14 @@ class MockSAPGateway(SAPGateway):
 
     def get_invoice_context(self, invoice: Invoice) -> dict[str, Any]:
         data = self._load()
-        po = next(
+        po = normalize_po(next(
             (
                 item
                 for item in data["purchase_orders"]
                 if item["po_number"] == invoice.po_number
             ),
             None,
-        )
+        ))
         vendor = next(
             (
                 item

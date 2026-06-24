@@ -12,6 +12,7 @@ from sqlalchemy.engine import Connection
 from app.integrations.sap.base import SAPGateway
 from app.models import Invoice
 from app.services.grn_status_control import normalize_grn_status
+from app.services.po_status_control import normalize_po_status
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
@@ -127,6 +128,7 @@ class APMasterGateway(SAPGateway):
             )
 
         vendor_name = row.get("vendor_name") or ""
+        raw_status = row.get("po_status")
         return {
             "po_number": row.get("po_number"),
             "vendor_number": _vendor_key(vendor_name),
@@ -134,7 +136,8 @@ class APMasterGateway(SAPGateway):
             "company_code": "1000",
             "currency": row.get("currency"),
             "payment_terms": None,
-            "status": row.get("po_status"),
+            "status": normalize_po_status(raw_status),
+            "raw_status": raw_status,
             "items": items,
         }
 

@@ -7,6 +7,7 @@ from app.integrations.llm.base import LLMClient
 
 RULE_TO_CATEGORY = {
     "AP-001": ("PO_MISSING", "HIGH", "PROCUREMENT"),
+    "PO-001": ("PO_STATUS_INVALID", "HIGH", "PROCUREMENT"),
     "AP-002": ("VENDOR_NOT_FOUND", "HIGH", "VENDOR_MASTER"),
     "AP-003": ("BLOCKED_VENDOR", "CRITICAL", "VENDOR_MASTER"),
     "AP-004": ("VENDOR_MISMATCH", "HIGH", "PROCUREMENT"),

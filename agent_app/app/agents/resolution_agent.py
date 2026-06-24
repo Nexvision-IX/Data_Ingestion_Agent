@@ -5,6 +5,10 @@ RESOLUTION_MAP = {
     "PO_MISSING": (
         "Ask Procurement to provide or create the correct purchase order."
     ),
+    "PO_STATUS_INVALID": (
+        "Ask Procurement or AP to confirm whether the PO should be "
+        "reopened, corrected, released, or replaced before invoice posting."
+    ),
     "VENDOR_NOT_FOUND": (
         "Ask the Vendor Master team to validate the vendor record."
     ),

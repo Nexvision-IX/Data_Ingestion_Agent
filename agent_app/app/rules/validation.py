@@ -27,7 +27,12 @@ class APValidationEngine:
         context: dict[str, Any],
     ) -> list[RuleResult]:
         results: list[RuleResult] = []
-        po = context.get("po")
+        from app.services.po_status_control import (
+            POStatusControl,
+            normalize_po,
+        )
+
+        po = normalize_po(context.get("po"))
         vendor = context.get("vendor")
         from app.services.grn_status_control import (
             GRNStatusControl,
@@ -54,6 +59,10 @@ class APValidationEngine:
                 ),
                 {"po_number": invoice.po_number},
             )
+        )
+
+        results.append(
+            POStatusControl().evaluate(po)
         )
 
         results.append(
