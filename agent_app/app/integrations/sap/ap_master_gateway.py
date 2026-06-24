@@ -13,6 +13,7 @@ from app.integrations.sap.base import SAPGateway
 from app.models import Invoice
 from app.services.grn_status_control import normalize_grn_status
 from app.services.po_status_control import normalize_po_status
+from app.services.vendor_master_control import normalize_vendor
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
@@ -68,19 +69,14 @@ class APMasterGateway(SAPGateway):
         vendor = None
 
         if po:
-            vendor = {
+            vendor = normalize_vendor({
                 "vendor_number": po["vendor_number"],
                 "vendor_name": po["vendor_name"],
                 "status": "ACTIVE",
+                "raw_status": "ACTIVE",
                 "payment_terms": po.get("payment_terms"),
-            }
-        elif invoice.vendor_name:
-            vendor = {
-                "vendor_number": invoice.vendor_number,
-                "vendor_name": invoice.vendor_name,
-                "status": "ACTIVE",
-                "payment_terms": invoice.payment_terms,
-            }
+                "source": "PO_INFERRED_VENDOR_CONTEXT",
+            })
 
         return {
             "po": po,

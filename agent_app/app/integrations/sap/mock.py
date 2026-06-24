@@ -11,6 +11,7 @@ from app.integrations.sap.base import SAPGateway
 from app.models import Invoice
 from app.services.grn_status_control import normalize_grn
 from app.services.po_status_control import normalize_po
+from app.services.vendor_master_control import normalize_vendor
 
 
 _LOCK = threading.Lock()
@@ -53,14 +54,16 @@ class MockSAPGateway(SAPGateway):
             ),
             None,
         ))
-        vendor = next(
+        vendor = normalize_vendor(next(
             (
                 item
                 for item in data["vendors"]
                 if item["vendor_number"] == invoice.vendor_number
             ),
             None,
-        )
+        ))
+        if vendor:
+            vendor["source"] = "MOCK_VENDOR_MASTER"
         grns = [
             normalize_grn(item)
             for item in data["grns"]

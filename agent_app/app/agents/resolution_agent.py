@@ -20,6 +20,10 @@ RESOLUTION_MAP = {
         "Ask Procurement to correct the PO vendor or provide the "
         "correct PO."
     ),
+    "VENDOR_MASTER_DATA_INCOMPLETE": (
+        "Ask Vendor Master or AP to complete missing vendor tax or "
+        "payment details before production auto-posting."
+    ),
     "CURRENCY_MISMATCH": (
         "Ask AP or Procurement to confirm and correct the invoice or "
         "PO currency."

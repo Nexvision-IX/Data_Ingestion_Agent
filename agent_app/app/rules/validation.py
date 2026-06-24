@@ -33,7 +33,12 @@ class APValidationEngine:
         )
 
         po = normalize_po(context.get("po"))
-        vendor = context.get("vendor")
+        from app.services.vendor_master_control import (
+            VendorMasterControl,
+            normalize_vendor,
+        )
+
+        vendor = normalize_vendor(context.get("vendor"))
         from app.services.grn_status_control import (
             GRNStatusControl,
             VALID_GRN_STATUSES,
@@ -130,6 +135,10 @@ class APValidationEngine:
                     ),
                 },
             )
+        )
+
+        results.extend(
+            VendorMasterControl().evaluate(invoice, vendor, po)
         )
 
         currency_match = (
