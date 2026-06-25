@@ -10,14 +10,10 @@ from sqlalchemy.orm import Session
 
 from app.agents.extraction_agent import MockExtractionAgent
 from app.config import settings
+from app.integrations.llm.factory import get_llm_client
 from app.models import Invoice, InvoiceLine, WorkflowEvent
 from app.schemas import ExtractedInvoice
-from app.services.status_catalog_service import (
-    InvoiceWorkflowStatus,
-    set_invoice_status_without_transition,
-)
-
-
+from app.services.extraction_quality_service import ExtractionQualityService
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
@@ -30,6 +26,9 @@ class IntakeService:
     def __init__(self, db: Session):
         self.db = db
         self.extractor = MockExtractionAgent()
+        self.extraction_quality = ExtractionQualityService(
+            db, get_llm_client()
+        )
 
     def create_demo(self, scenario: str) -> Invoice:
         extracted = self.extractor.extract(scenario=scenario)
@@ -147,12 +146,10 @@ class IntakeService:
 
         self.db.add(invoice)
         self.db.flush()
-        set_invoice_status_without_transition(
+        self.extraction_quality.process(
             invoice,
-            InvoiceWorkflowStatus.EXTRACTED,
-            "Invoice initialized from extracted document data.",
-            actor="IntakeService",
-            metadata={"initialization": True, "source": source},
+            allow_retry=source != "AP_MASTER_IMPORT",
+            raw_evidence=invoice.extraction_raw,
         )
         self.db.add(
             WorkflowEvent(
@@ -160,11 +157,12 @@ class IntakeService:
                 event_type="INVOICE_EXTRACTED",
                 agent_name="MockExtractionAgent",
                 message=(
-                    "Invoice intake and mock extraction completed."
+                    "Invoice intake and initial mock extraction completed."
                 ),
                 metadata_json={
                     "confidence": extracted.confidence,
                     "source": source,
+                    "quality_status": invoice.status,
                 },
             )
         )

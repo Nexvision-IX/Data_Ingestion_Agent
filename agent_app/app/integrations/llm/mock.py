@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 from app.integrations.llm.base import LLMClient
 
 
 RULE_TO_CATEGORY = {
+    **{
+        f"OCR-{index:03d}": (
+            "EXTRACTION_QUALITY_ISSUE",
+            "HIGH",
+            "AP_OCR_REVIEW",
+        )
+        for index in range(1, 11)
+    },
     "AP-001": ("PO_MISSING", "HIGH", "PROCUREMENT"),
     "PO-001": ("PO_STATUS_INVALID", "HIGH", "PROCUREMENT"),
     "AP-002": ("VENDOR_NOT_FOUND", "HIGH", "VENDOR_MASTER"),
@@ -77,6 +86,20 @@ class MockLLMClient(LLMClient):
         payload: dict[str, Any],
         schema_hint: dict[str, Any],
     ) -> dict[str, Any]:
+        if task == "extraction_repair":
+            original = copy.deepcopy(
+                payload.get("original_extracted_json") or {}
+            )
+            evidence = payload.get("raw_evidence") or {}
+            corrections = (
+                evidence.get("mock_corrections", {})
+                if isinstance(evidence, dict)
+                else {}
+            )
+            if isinstance(corrections, dict):
+                original.update(copy.deepcopy(corrections))
+            return original
+
         if task == "classification":
             failures = payload.get("failed_validations", [])
             first = failures[0] if failures else {

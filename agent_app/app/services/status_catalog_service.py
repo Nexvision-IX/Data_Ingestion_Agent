@@ -222,6 +222,7 @@ ALLOWED_INVOICE_STATUS_TRANSITIONS = {
         InvoiceWorkflowStatus.EXTRACTED,
         InvoiceWorkflowStatus.EXTRACTION_FAILED,
         InvoiceWorkflowStatus.EXTRACTION_RETRY_REQUIRED,
+        InvoiceWorkflowStatus.EXTRACTION_REVIEW_REQUIRED,
     },
     InvoiceWorkflowStatus.EXTRACTION_FAILED: {
         InvoiceWorkflowStatus.EXTRACTION_RETRY_REQUIRED,

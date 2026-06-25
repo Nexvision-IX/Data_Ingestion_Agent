@@ -25,12 +25,21 @@ def invoice_summary(invoice: Invoice) -> dict:
 
 def invoice_payload(invoice: Invoice) -> dict:
     data = invoice_summary(invoice)
+    quality = (invoice.extraction_raw or {}).get(
+        "extraction_quality", {}
+    )
     data.update(
         {
             "subtotal": invoice.subtotal,
             "tax_amount": invoice.tax_amount,
             "payment_terms": invoice.payment_terms,
             "extraction_confidence": invoice.extraction_confidence,
+            "extraction_quality_status": quality.get("status"),
+            "extraction_quality_failed_rules": quality.get(
+                "failed_rules", []
+            ),
+            "extraction_retry_count": quality.get("retry_count", 0),
+            "extraction_review_reason": quality.get("review_reason"),
             "lines": [
                 {
                     "line_number": line.line_number,

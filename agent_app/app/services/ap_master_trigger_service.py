@@ -21,6 +21,8 @@ from app.models import (
     ValidationResult,
     WorkflowEvent,
 )
+from app.integrations.llm.mock import MockLLMClient
+from app.services.extraction_quality_service import ExtractionQualityService
 from app.services.po_grn_consumption_ledger_service import (
     POGRNConsumptionLedgerService,
 )
@@ -43,6 +45,9 @@ from ap_database.master_models import InvoiceMaster, SapPostedInvoiceMaster
 SAFE_REPROCESS_STATUSES = frozenset(
     {
         InvoiceWorkflowStatus.RECEIVED,
+        InvoiceWorkflowStatus.EXTRACTION_FAILED,
+        InvoiceWorkflowStatus.EXTRACTION_RETRY_REQUIRED,
+        InvoiceWorkflowStatus.EXTRACTION_REVIEW_REQUIRED,
         InvoiceWorkflowStatus.EXTRACTED,
         "SAP_DATA_PENDING",
         InvoiceWorkflowStatus.VALIDATION_IN_PROGRESS,
@@ -208,7 +213,8 @@ class APMasterTriggerService:
 
             try:
                 invoice = self._create_agent_invoice(row)
-                self._orchestrator().process(invoice)
+                if invoice.status == InvoiceWorkflowStatus.EXTRACTED:
+                    self._orchestrator().process(invoice)
 
                 self.db.refresh(invoice)
 
@@ -323,6 +329,21 @@ class APMasterTriggerService:
         )
         self.db.commit()
         self.db.refresh(invoice)
+
+        if invoice.status != InvoiceWorkflowStatus.EXTRACTED:
+            return {
+                "source": "invoice_master",
+                "invoice_number": invoice.invoice_number,
+                "agent_invoice_id": invoice.id,
+                "previous_status": previous_status,
+                "status": invoice.status,
+                "reset_counts": reset_counts,
+                "reprocessed": False,
+                "reason": (
+                    "Structured AP master data did not pass the extraction "
+                    "quality gate and requires review."
+                ),
+            }
 
         try:
             self._orchestrator().process(invoice)
@@ -503,14 +524,16 @@ class APMasterTriggerService:
 
         self.db.add(invoice)
         self.db.flush()
-        set_invoice_status_without_transition(
-            invoice,
-            InvoiceWorkflowStatus.EXTRACTED,
-            "Invoice initialized from AP master extracted data.",
-            actor="APMasterTriggerService",
-            metadata={"initialization": True},
-        )
         self._add_invoice_lines(invoice, row)
+        self.db.flush()
+        self.db.expire(invoice, ["lines"])
+        ExtractionQualityService(
+            self.db, MockLLMClient()
+        ).process(
+            invoice,
+            allow_retry=False,
+            raw_evidence=invoice.extraction_raw,
+        )
 
         self.db.add(
             WorkflowEvent(
@@ -637,8 +660,8 @@ class APMasterTriggerService:
         )
         set_invoice_status_without_transition(
             invoice,
-            InvoiceWorkflowStatus.EXTRACTED,
-            "Invoice reset to extracted state from AP master source.",
+            InvoiceWorkflowStatus.RECEIVED,
+            "Invoice reset to intake state from AP master source.",
             actor="APMasterTriggerService",
             metadata={"controlled_reprocess": True},
         )
@@ -655,6 +678,15 @@ class APMasterTriggerService:
             "raw_json": raw_json or _json_compatible(row),
         }
         self._add_invoice_lines(invoice, row)
+        self.db.flush()
+        self.db.expire(invoice, ["lines"])
+        ExtractionQualityService(
+            self.db, MockLLMClient()
+        ).process(
+            invoice,
+            allow_retry=False,
+            raw_evidence=invoice.extraction_raw,
+        )
 
     def _add_invoice_lines(self, invoice: Invoice, row: dict) -> None:
         items = _load_json(row.get("items_json"), [])

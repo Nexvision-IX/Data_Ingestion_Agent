@@ -80,6 +80,15 @@ class Settings:
     )
     recheck_max_attempts: int = int(os.getenv("RECHECK_MAX_ATTEMPTS", "3"))
     auto_post_clean_invoices: bool = _bool("AUTO_POST_CLEAN_INVOICES", True)
+    min_extraction_confidence: float = float(
+        os.getenv("MIN_EXTRACTION_CONFIDENCE", "0.80")
+    )
+    extraction_reconciliation_tolerance: float = float(
+        os.getenv("EXTRACTION_RECONCILIATION_TOLERANCE", "0.01")
+    )
+    extraction_max_retry_attempts: int = int(
+        os.getenv("EXTRACTION_MAX_RETRY_ATTEMPTS", "1")
+    )
 
     llm_provider: str = os.getenv("LLM_PROVIDER", "mock").lower()
     llm_api_key: str = os.getenv("LLM_API_KEY", "")

@@ -2,6 +2,11 @@ from __future__ import annotations
 
 
 RESOLUTION_MAP = {
+    "EXTRACTION_QUALITY_ISSUE": (
+        "Ask AP or OCR Review to compare the structured extraction with "
+        "the source document, correct unreliable fields, and use controlled "
+        "reprocessing before AP validation."
+    ),
     "PO_MISSING": (
         "Ask Procurement to provide or create the correct purchase order."
     ),

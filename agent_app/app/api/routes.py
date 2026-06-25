@@ -30,6 +30,7 @@ from app.schemas import (
 )
 from app.services.intake_service import IntakeService
 from app.services.orchestrator import APOrchestrator
+from app.services.status_catalog_service import InvoiceWorkflowStatus
 from app.services.serializers import (
     invoice_detail,
     invoice_summary,
@@ -82,7 +83,8 @@ def create_demo(
         )
 
     invoice = IntakeService(db).create_demo(scenario)
-    invoice = APOrchestrator(db).process(invoice)
+    if invoice.status == InvoiceWorkflowStatus.EXTRACTED:
+        invoice = APOrchestrator(db).process(invoice)
     return invoice_detail(
         _load_invoice(db, invoice.id)
     )
@@ -108,7 +110,8 @@ def upload_invoice(
             file,
             scenario=scenario,
         )
-        invoice = APOrchestrator(db).process(invoice)
+        if invoice.status == InvoiceWorkflowStatus.EXTRACTED:
+            invoice = APOrchestrator(db).process(invoice)
         return invoice_detail(
             _load_invoice(db, invoice.id)
         )

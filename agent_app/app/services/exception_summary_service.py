@@ -8,6 +8,7 @@ from app.models import ExceptionCase, Invoice, WorkflowEvent
 
 
 OWNER_BY_CATEGORY = {
+    "EXTRACTION_QUALITY_ISSUE": "AP / OCR Review",
     "VENDOR_NOT_FOUND": "Vendor Master / AP",
     "BLOCKED_VENDOR": "Vendor Master / AP",
     "VENDOR_MISMATCH": "Vendor Master / AP",
@@ -49,6 +50,10 @@ RECHECK_ELIGIBLE_CATEGORIES = frozenset(
 )
 
 NON_RECHECK_REASONS = {
+    "EXTRACTION_QUALITY_ISSUE": (
+        "Extraction quality failures require corrected invoice data and "
+        "controlled reprocessing; automatic source-data recheck is disabled."
+    ),
     "FINANCIAL_MISMATCH": (
         "Invoice financial data must be corrected and reprocessed before "
         "deterministic validation can pass."
