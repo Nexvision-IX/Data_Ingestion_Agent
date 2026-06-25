@@ -40,6 +40,10 @@ from app.services.po_grn_consumption_ledger_service import (
 )
 from app.services.tax_validation_control import TaxValidationControl
 from app.services.payment_terms_control import PaymentTermsControl
+from app.services.exception_summary_service import (
+    ExceptionSummaryService,
+    owner_for_category,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -113,31 +117,7 @@ class APOrchestrator:
             )
         )
 
-        results = self.validator.validate(
-            invoice,
-            context,
-        )
-        results.extend(
-            DuplicateInvoiceControl(self.db).evaluate(invoice)
-        )
-        results.extend(
-            InvoiceFinancialControl().evaluate(invoice)
-        )
-        results.extend(
-            PO_GRNConsumptionControl(self.db).evaluate(
-                invoice,
-                context,
-            )
-        )
-        results.extend(
-            DateSequenceControl().evaluate(invoice, context)
-        )
-        results.extend(
-            TaxValidationControl().evaluate(invoice, context)
-        )
-        results.extend(
-            PaymentTermsControl().evaluate(invoice, context)
-        )
+        results = self._run_validation_controls(invoice, context)
 
         for result in results:
             self.db.add(
@@ -222,6 +202,15 @@ class APOrchestrator:
         resolution = self.resolver.recommend(
             classification.category
         )
+        summary_service = ExceptionSummaryService(self.db)
+        summary = summary_service.build(
+            invoice=invoice,
+            category=classification.category,
+            severity=classification.priority,
+            validation_results=results,
+            recommended_resolution=resolution,
+        )
+        assigned_owner = owner_for_category(classification.category)
 
         existing_open = next(
             (
@@ -241,7 +230,7 @@ class APOrchestrator:
                 classification.rationale
             )
             existing_open.priority = classification.priority
-            existing_open.owner_team = classification.owner_team
+            existing_open.owner_team = assigned_owner
             existing_open.resolution_strategy = resolution
             exception = existing_open
 
@@ -256,7 +245,7 @@ class APOrchestrator:
                     classification.rationale
                 ),
                 priority=classification.priority,
-                owner_team=classification.owner_team,
+                owner_team=assigned_owner,
                 status="OPEN",
                 resolution_strategy=resolution,
             )
@@ -283,6 +272,7 @@ class APOrchestrator:
             resolution,
             {"category": classification.category},
         )
+        summary_service.record_events(invoice, summary)
 
         has_draft = any(
             communication.exception_id == exception.id
@@ -296,6 +286,7 @@ class APOrchestrator:
                 CommunicationRequest(
                     send=settings.auto_send_email
                 ),
+                exception_summary=summary,
             )
 
         return exception
@@ -304,12 +295,22 @@ class APOrchestrator:
         self,
         exception: ExceptionCase,
         request: CommunicationRequest,
+        exception_summary: dict | None = None,
     ) -> Communication:
         invoice = exception.invoice
+        if exception_summary is None:
+            exception_summary = ExceptionSummaryService(self.db).build(
+                invoice=invoice,
+                category=exception.category,
+                severity=exception.priority,
+                validation_results=invoice.validations,
+                recommended_resolution=exception.resolution_strategy,
+            )
 
         draft = self.communicator.draft(
             invoice_payload(invoice),
             exception_payload(exception),
+            exception_summary=exception_summary,
             context=request.context,
         )
 
@@ -323,18 +324,18 @@ class APOrchestrator:
             or settings.auto_send_email
         )'''
 
-        recipient = settings.ap_exception_recipient
+        should_send = request.send or settings.auto_send_email
+        recipient = (
+            request.recipient
+            or settings.ap_exception_recipient
+            or draft.recipient_role
+        )
 
-        if not recipient:
+        if should_send and not settings.ap_exception_recipient and not request.recipient:
             raise ValueError(
                 "AP_EXCEPTION_RECIPIENT is not configured. "
                 "Set it in agent_app/.env before sending emails."
             )
-
-        should_send = (
-            request.send
-            or settings.auto_send_email
-        )
 
         if should_send:
             delivery = self.smtp.send(
@@ -362,6 +363,18 @@ class APOrchestrator:
 
         self.db.add(communication)
 
+        ExceptionSummaryService(
+            self.db
+        ).record_communication_drafted(
+            invoice,
+            exception_id=exception.id,
+            recipient_role=draft.recipient_role,
+            subject=draft.subject,
+            recheck_eligible=bool(
+                exception_summary.get("recheck_eligible")
+            ),
+        )
+
         self._event(
             invoice,
             "COMMUNICATION_CREATED",
@@ -383,7 +396,7 @@ class APOrchestrator:
         self,
         invoice: Invoice,
         request: RecheckRequest,
-    ) -> Invoice:
+    ) -> Invoice | dict:
         exception = next(
             (
                 item
@@ -397,6 +410,17 @@ class APOrchestrator:
             raise ValueError(
                 "Invoice has no open exception to recheck"
             )
+
+        summary_service = ExceptionSummaryService(self.db)
+        eligibility, business_response = (
+            summary_service.evaluate_recheck_request(
+                invoice,
+                exception,
+            )
+        )
+        if business_response is not None:
+            self.db.commit()
+            return business_response
 
         exception.recheck_count += 1
 
@@ -418,7 +442,7 @@ class APOrchestrator:
 
         context = self.sap.get_invoice_context(invoice)
 
-        current_results = self.validator.validate(
+        current_results = self._run_validation_controls(
             invoice,
             context,
         )
@@ -430,6 +454,7 @@ class APOrchestrator:
                 "latest_message": request.latest_message or "",
                 "recheck_count": exception.recheck_count,
                 "max_attempts": settings.recheck_max_attempts,
+                "recheck_eligibility": eligibility,
                 "latest_source_snapshot": context,
                 "deterministic_preview": [
                     result.to_dict()
@@ -507,6 +532,40 @@ class APOrchestrator:
         self.db.refresh(invoice)
 
         return invoice
+
+    def _run_validation_controls(
+        self,
+        invoice: Invoice,
+        context: dict,
+    ) -> list:
+        """Run authoritative deterministic controls.
+
+        LLM-backed agents may classify, explain, draft, or summarize these
+        results, but they cannot override their pass/fail decisions.
+        """
+        results = self.validator.validate(invoice, context)
+        results.extend(
+            DuplicateInvoiceControl(self.db).evaluate(invoice)
+        )
+        results.extend(
+            InvoiceFinancialControl().evaluate(invoice)
+        )
+        results.extend(
+            PO_GRNConsumptionControl(self.db).evaluate(
+                invoice,
+                context,
+            )
+        )
+        results.extend(
+            DateSequenceControl().evaluate(invoice, context)
+        )
+        results.extend(
+            TaxValidationControl().evaluate(invoice, context)
+        )
+        results.extend(
+            PaymentTermsControl().evaluate(invoice, context)
+        )
+        return results
 
     def _posted_invoice_payload(
         self,

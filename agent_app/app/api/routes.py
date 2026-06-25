@@ -174,7 +174,7 @@ def recheck_invoice(
 ):
     invoice = _load_invoice(db, invoice_id)
     try:
-        APOrchestrator(db).recheck(
+        result = APOrchestrator(db).recheck(
             invoice,
             request,
         )
@@ -183,6 +183,14 @@ def recheck_invoice(
             status_code=400,
             detail=str(exc),
         ) from exc
+
+    if isinstance(result, dict):
+        return {
+            **result,
+            "invoice": invoice_detail(
+                _load_invoice(db, invoice_id)
+            ),
+        }
 
     return invoice_detail(
         _load_invoice(db, invoice_id)

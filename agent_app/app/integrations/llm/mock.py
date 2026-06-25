@@ -96,39 +96,79 @@ class MockLLMClient(LLMClient):
         if task == "communication":
             invoice = payload["invoice"]
             exception = payload["exception"]
+            summary = payload.get("exception_summary") or {}
             category = exception["category"]
-            recipient_role = {
-                "GRN_MISSING": "Requester / Goods Receiver",
-                "PRICE_MISMATCH": "Procurement",
-                "BLOCKED_VENDOR": "Vendor Master Team",
-                "DUPLICATE_INVOICE": "AP Reviewer",
-            }.get(category, exception.get("owner_team", "AP"))
+            recipient_role = summary.get(
+                "owner_team",
+                exception.get("owner_team", "AP"),
+            )
+            failed_messages = summary.get("failed_rule_messages", [])
+            failed_controls = "\n".join(
+                (
+                    f"- {item.get('rule_code')}: "
+                    f"{item.get('message')}"
+                )
+                for item in failed_messages
+            ) or "- See the AP exception record for failed controls."
+            recheck_note = (
+                "This exception is eligible for recheck after the requested "
+                "external data update is confirmed."
+                if summary.get("recheck_eligible")
+                else (
+                    "This exception is not eligible for automatic recheck; "
+                    "corrected invoice data or manual review is required."
+                )
+            )
             return {
                 "recipient_role": recipient_role,
                 "subject": (
-                    f"Action required: {category} for invoice "
+                    f"AP exception action required: invoice "
                     f"{invoice['invoice_number']}"
                 ),
                 "body": (
-                    "Hello,\n\n"
-                    f"Invoice {invoice['invoice_number']} from "
-                    f"{invoice['vendor_name']} cannot proceed because of "
-                    f"{category.replace('_', ' ').lower()}.\n\n"
-                    "Required action: "
-                    f"{exception.get('resolution_strategy', 'Please review the issue.')}.\n\n"
+                    f"Hello {recipient_role},\n\n"
+                    "Reason for exception\n"
+                    f"{category.replace('_', ' ').title()} prevents the "
+                    "invoice from proceeding.\n\n"
+                    "Invoice details\n"
+                    f"Invoice: {invoice['invoice_number']}\n"
+                    f"Vendor: {invoice['vendor_name']}\n"
                     f"PO: {invoice.get('po_number') or 'Not provided'}\n"
                     f"Invoice amount: {invoice['currency']} "
                     f"{invoice['total_amount']:.2f}\n\n"
-                    "Please reply after the required update is completed.\n\n"
+                    "Failed controls\n"
+                    f"{failed_controls}\n\n"
+                    "Action needed\n"
+                    f"{summary.get('recommended_resolution') or exception.get('resolution_strategy', 'Please review and correct the issue.')}\n\n"
+                    "Recheck note\n"
+                    f"{recheck_note}\n\n"
+                    "Please confirm when the requested action is complete.\n\n"
                     "Regards,\nAccounts Payable Agent"
                 ),
-                "requested_action": exception.get(
-                    "resolution_strategy",
-                    "Review and correct the exception.",
+                "requested_action": summary.get(
+                    "next_action",
+                    exception.get(
+                        "resolution_strategy",
+                        "Review and correct the exception.",
+                    ),
                 ),
             }
 
         if task == "recheck":
+            eligibility = payload.get("recheck_eligibility") or {}
+            if not eligibility.get("eligible", False):
+                return {
+                    "decision": "ESCALATE",
+                    "confidence": 1.0,
+                    "rationale": eligibility.get(
+                        "reason",
+                        "Automatic recheck is not allowed for this category.",
+                    ),
+                    "next_action": eligibility.get(
+                        "next_action",
+                        "Use manual review or controlled reprocessing.",
+                    ),
+                }
             message = (payload.get("latest_message") or "").lower()
             count = int(payload.get("recheck_count", 0))
             positive_terms = [

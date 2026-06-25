@@ -14,6 +14,8 @@ WAIT means evidence is insufficient.
 ESCALATE means retry or SLA limits or risk require a human.
 CLOSE is only for an explicitly cancelled or withdrawn invoice.
 Do not treat an email claim as proof that financial controls passed.
+Only recommend revalidation when the supplied deterministic eligibility
+assessment permits it. You summarize workflow evidence; you do not approve.
 Return the requested JSON only.
 """.strip()
 
