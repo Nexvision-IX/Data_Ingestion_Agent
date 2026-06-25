@@ -11,6 +11,18 @@ class LLMClient(ABC):
     summarize recheck evidence. They must not replace deterministic AP
     validation or make posting-approval decisions.
     """
+
+    provider_name = "unknown"
+    model_name = ""
+
+    def audit_metadata(self, *, task: str) -> dict[str, str]:
+        """Return non-sensitive metadata suitable for workflow logging."""
+        return {
+            "provider": self.provider_name,
+            "model": self.model_name,
+            "task": task,
+        }
+
     @abstractmethod
     def generate_json(
         self,

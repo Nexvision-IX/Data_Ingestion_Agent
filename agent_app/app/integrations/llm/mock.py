@@ -64,6 +64,11 @@ RULE_TO_CATEGORY = {
 class MockLLMClient(LLMClient):
     """Deterministic LLM substitute so the complete project runs without a key."""
 
+    provider_name = "mock"
+
+    def __init__(self, model: str = "mock-model"):
+        self.model_name = model or "mock-model"
+
     def generate_json(
         self,
         *,

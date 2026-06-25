@@ -83,9 +83,10 @@ class Settings:
 
     llm_provider: str = os.getenv("LLM_PROVIDER", "mock").lower()
     llm_api_key: str = os.getenv("LLM_API_KEY", "")
-    llm_model: str = os.getenv("LLM_MODEL", "mock-model")
+    llm_model: str = os.getenv("LLM_MODEL", "")
     llm_base_url: str = os.getenv("LLM_BASE_URL", "")
     llm_timeout_seconds: int = int(os.getenv("LLM_TIMEOUT_SECONDS", "60"))
+    llm_max_retries: int = int(os.getenv("LLM_MAX_RETRIES", "2"))
 
     smtp_host: str = os.getenv("SMTP_HOST", "")
     smtp_port: int = int(os.getenv("SMTP_PORT", "587"))
