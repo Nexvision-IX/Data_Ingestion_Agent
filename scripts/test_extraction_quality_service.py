@@ -20,6 +20,7 @@ from app.models import Invoice, InvoiceLine, WorkflowEvent  # noqa: E402
 from app.services.extraction_quality_service import (  # noqa: E402
     ExtractionQualityService,
     evaluate_extraction_quality,
+    extraction_quality_status,
     is_extraction_clean,
     recommended_extraction_status,
 )
@@ -28,6 +29,10 @@ from app.services.exception_summary_service import (  # noqa: E402
     recheck_eligibility,
 )
 from app.services.serializers import invoice_detail  # noqa: E402
+from app.rules.validation import APValidationEngine  # noqa: E402
+from app.services.status_catalog_service import (  # noqa: E402
+    transition_invoice_status,
+)
 
 
 def complete_payload() -> dict:
@@ -63,32 +68,82 @@ def failed_codes(payload: dict, source: str = "UPLOAD") -> set[str]:
     }
 
 
+def failed_codes_by_severity(
+    payload: dict,
+    severity: str,
+    source: str = "UPLOAD",
+) -> set[str]:
+    return {
+        result["rule_code"]
+        for result in evaluate_extraction_quality(payload, source)
+        if not result["passed"] and result["severity"] == severity
+    }
+
+
 def test_individual_rules() -> None:
     clean = evaluate_extraction_quality(complete_payload(), "UPLOAD")
     assert is_extraction_clean(clean)
 
-    cases = [
+    blocking_cases = [
         ("OCR-001", {"invoice_number": ""}),
         ("OCR-002", {"vendor_name": "", "vendor_number": ""}),
-        ("OCR-003", {"po_number": None}),
         ("OCR-004", {"invoice_date": "not-a-date"}),
         ("OCR-005", {"currency": ""}),
-        ("OCR-006", {"subtotal": None}),
-        ("OCR-007", {"lines": []}),
+        ("OCR-006", {"total_amount": None}),
         ("OCR-008", {"confidence": 0.4}),
-        ("OCR-009", {"total_amount": 999}),
-        ("OCR-010", {"subtotal": 101, "total_amount": 119}),
     ]
-    for expected_rule, changes in cases:
+    for expected_rule, changes in blocking_cases:
         payload = complete_payload()
         payload.update(changes)
-        assert expected_rule in failed_codes(payload), expected_rule
+        assert expected_rule in failed_codes_by_severity(
+            payload, "ERROR"
+        ), expected_rule
+
+    missing_po = complete_payload()
+    missing_po["po_number"] = None
+    assert "OCR-003" in failed_codes_by_severity(
+        missing_po, "WARNING"
+    )
+    assert is_extraction_clean(
+        evaluate_extraction_quality(missing_po, "UPLOAD")
+    )
 
     empty_lines = complete_payload()
     empty_lines["lines"] = []
-    empty_line_failures = failed_codes(empty_lines)
-    assert "OCR-007" in empty_line_failures
-    assert "OCR-010" not in empty_line_failures
+    assert "OCR-007" in failed_codes_by_severity(
+        empty_lines, "WARNING"
+    )
+    assert "OCR-010" not in failed_codes(empty_lines)
+    assert is_extraction_clean(
+        evaluate_extraction_quality(empty_lines, "UPLOAD")
+    )
+
+    partial_header = complete_payload()
+    partial_header["subtotal"] = None
+    partial_header["tax_amount"] = None
+    partial_results = evaluate_extraction_quality(
+        partial_header, "UPLOAD"
+    )
+    assert "OCR-006" in failed_codes_by_severity(
+        partial_header, "WARNING"
+    )
+    assert is_extraction_clean(partial_results)
+    assert extraction_quality_status(
+        partial_results
+    ) == "PASSED_WITH_WARNINGS"
+
+    total_mismatch = complete_payload()
+    total_mismatch["total_amount"] = 999
+    assert "OCR-009" in failed_codes_by_severity(
+        total_mismatch, "WARNING"
+    )
+
+    line_mismatch = complete_payload()
+    line_mismatch["subtotal"] = 101
+    line_mismatch["total_amount"] = 119
+    assert "OCR-010" in failed_codes_by_severity(
+        line_mismatch, "WARNING"
+    )
 
 
 class FailingRepairLLM(MockLLMClient):
@@ -184,6 +239,78 @@ def test_retry_workflow(session: Session) -> None:
     assert detail["extraction_retry_count"] == 1
     assert detail["extraction_review_reason"]
 
+
+def test_warning_only_business_data_flows_to_ap(
+    session: Session,
+) -> None:
+    missing_po_payload = complete_payload()
+    missing_po_payload["invoice_number"] = "INV-MISSING-PO-BOUNDARY"
+    missing_po_payload["po_number"] = None
+    missing_po = invoice_from_payload(missing_po_payload)
+    session.add(missing_po)
+    session.flush()
+
+    quality_results = ExtractionQualityService(
+        session, MockLLMClient()
+    ).process(missing_po)
+    assert is_extraction_clean(quality_results)
+    assert missing_po.status == "EXTRACTED"
+    quality = missing_po.extraction_raw["extraction_quality"]
+    assert quality["status"] == "PASSED_WITH_WARNINGS"
+    assert quality["failed_error_rules"] == []
+    assert quality["warning_rules"] == ["OCR-003"]
+    detail = invoice_detail(missing_po)
+    assert detail["extraction_quality_failed_rules"] == []
+    assert detail["extraction_quality_warning_rules"] == ["OCR-003"]
+
+    ap_results = APValidationEngine().validate(
+        missing_po,
+        {
+            "po": None,
+            "vendor": None,
+            "grns": [],
+            "invoice_history": [],
+        },
+    )
+    ap_001 = next(
+        result for result in ap_results if result.rule_code == "AP-001"
+    )
+    assert ap_001.passed is False
+    classification = MockLLMClient().generate_json(
+        task="classification",
+        system_prompt="Classify deterministic AP failures only.",
+        payload={"failed_validations": [ap_001.to_dict()]},
+        schema_hint={"type": "object"},
+    )
+    assert classification["category"] == "PO_MISSING"
+    transition_invoice_status(
+        missing_po,
+        "VALIDATION_IN_PROGRESS",
+        "AP validation started.",
+        actor="BoundaryRegressionTest",
+    )
+    transition_invoice_status(
+        missing_po,
+        "EXCEPTION_IDENTIFIED",
+        "AP validation identified missing PO.",
+        actor="BoundaryRegressionTest",
+    )
+    assert missing_po.status == "EXCEPTION_IDENTIFIED"
+
+    no_lines_payload = complete_payload()
+    no_lines_payload["invoice_number"] = "INV-NO-LINES-BOUNDARY"
+    no_lines_payload["lines"] = []
+    no_lines = invoice_from_payload(no_lines_payload)
+    session.add(no_lines)
+    session.flush()
+    no_line_results = ExtractionQualityService(
+        session, MockLLMClient()
+    ).process(no_lines)
+    assert is_extraction_clean(no_line_results)
+    assert no_lines.status == "EXTRACTED"
+    no_line_quality = no_lines.extraction_raw["extraction_quality"]
+    assert no_line_quality["status"] == "PASSED_WITH_WARNINGS"
+    assert no_line_quality["warning_rules"] == ["OCR-007"]
 
 def test_ap_master_structured_source(session: Session) -> None:
     payload = complete_payload()
@@ -282,6 +409,7 @@ def main() -> None:
         Base.metadata.create_all(engine)
         with Session(engine, expire_on_commit=False) as session:
             test_retry_workflow(session)
+            test_warning_only_business_data_flows_to_ap(session)
             test_ap_master_structured_source(session)
             test_technical_failure_and_idempotent_rerun(session)
             session.commit()

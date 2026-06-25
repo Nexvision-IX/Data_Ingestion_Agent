@@ -92,6 +92,7 @@ def _result(
     code: str,
     name: str,
     passed: bool,
+    severity: str,
     message: str,
     details: dict[str, Any],
 ) -> dict[str, Any]:
@@ -99,7 +100,7 @@ def _result(
         "rule_code": code,
         "rule_name": name,
         "passed": passed,
-        "severity": "ERROR",
+        "severity": severity,
         "message": message,
         "details": details,
     }
@@ -128,6 +129,16 @@ def evaluate_extraction_quality(
     financials_present = all(
         value is not None for value in (subtotal, tax_amount, total_amount)
     )
+    total_present = total_amount is not None
+    confidence_low = (
+        confidence is None
+        or confidence < Decimal(str(settings.min_extraction_confidence))
+    )
+    header_financial_severity = (
+        "ERROR"
+        if not total_present
+        else ("WARNING" if not financials_present else "INFO")
+    )
 
     line_amounts = []
     for line in lines:
@@ -155,6 +166,7 @@ def evaluate_extraction_quality(
             "OCR-001",
             "Invoice number is present",
             _present(data.get("invoice_number")),
+            "ERROR",
             (
                 "Invoice number was extracted."
                 if _present(data.get("invoice_number"))
@@ -167,6 +179,7 @@ def evaluate_extraction_quality(
             "Vendor identity is present",
             _present(data.get("vendor_name"))
             or _present(data.get("vendor_number")),
+            "ERROR",
             (
                 "Vendor name or number was extracted."
                 if _present(data.get("vendor_name"))
@@ -179,6 +192,7 @@ def evaluate_extraction_quality(
             "OCR-003",
             "PO number is present",
             _present(data.get("po_number")),
+            "WARNING",
             (
                 "PO number was extracted."
                 if _present(data.get("po_number"))
@@ -190,6 +204,7 @@ def evaluate_extraction_quality(
             "OCR-004",
             "Invoice date is present and parseable",
             invoice_date is not None,
+            "ERROR",
             (
                 "Invoice date is present and parseable."
                 if invoice_date is not None
@@ -201,6 +216,7 @@ def evaluate_extraction_quality(
             "OCR-005",
             "Currency is present",
             _present(data.get("currency")),
+            "ERROR",
             (
                 "Currency was extracted."
                 if _present(data.get("currency"))
@@ -212,10 +228,18 @@ def evaluate_extraction_quality(
             "OCR-006",
             "Header financial values are present",
             financials_present,
+            header_financial_severity,
             (
                 "Subtotal, tax amount, and total amount are present."
                 if financials_present
-                else "Subtotal, tax amount, or total amount is missing/invalid."
+                else (
+                    "Document total is missing or invalid."
+                    if not total_present
+                    else (
+                        "Document total is present, but subtotal or tax "
+                        "amount is missing/invalid."
+                    )
+                )
             ),
             {
                 "subtotal_present": subtotal is not None,
@@ -227,6 +251,7 @@ def evaluate_extraction_quality(
             "OCR-007",
             "At least one invoice line exists",
             bool(lines),
+            "WARNING",
             (
                 "At least one invoice line was extracted."
                 if lines
@@ -239,6 +264,7 @@ def evaluate_extraction_quality(
             "Extraction confidence meets threshold",
             confidence is not None
             and confidence >= Decimal(str(settings.min_extraction_confidence)),
+            "ERROR",
             (
                 "Extraction confidence meets the configured threshold."
                 if confidence is not None
@@ -257,6 +283,11 @@ def evaluate_extraction_quality(
             "Subtotal plus tax reconciles to total",
             bool(reconciles_total),
             (
+                "ERROR"
+                if not total_present or confidence_low
+                else ("WARNING" if not reconciles_total else "INFO")
+            ),
+            (
                 "Subtotal plus tax reconciles to the document total."
                 if reconciles_total
                 else "Subtotal plus tax does not reconcile to the document total."
@@ -270,12 +301,15 @@ def evaluate_extraction_quality(
                     float(total_amount) if total_amount is not None else None
                 ),
                 "tolerance": float(tolerance),
+                "confidence_low": confidence_low,
+                "reconciliation_available": financials_present,
             },
         ),
         _result(
             "OCR-010",
             "Line subtotal reconciles to invoice subtotal",
             bool(reconciles_lines),
+            "INFO" if not lines or reconciles_lines else "WARNING",
             (
                 "Line subtotal reconciliation is not applicable without lines."
                 if not lines
@@ -308,6 +342,19 @@ def is_extraction_clean(results: list[dict[str, Any]]) -> bool:
         not result["passed"] and result.get("severity") == "ERROR"
         for result in results
     )
+
+
+def extraction_quality_status(
+    results: list[dict[str, Any]],
+) -> str:
+    if not is_extraction_clean(results):
+        return "FAILED"
+    if any(
+        not result["passed"] and result.get("severity") == "WARNING"
+        for result in results
+    ):
+        return "PASSED_WITH_WARNINGS"
+    return "PASSED"
 
 
 def recommended_extraction_status(
@@ -408,6 +455,7 @@ class ExtractionQualityService:
                             result
                             for result in current_results
                             if not result["passed"]
+                            and result["severity"] == "ERROR"
                         ],
                     },
                     schema_hint={
@@ -511,10 +559,12 @@ class ExtractionQualityService:
         )
         clean = is_extraction_clean(results)
         failed_codes = self._failed_codes(results)
+        warning_codes = self._warning_codes(results)
+        quality_status = extraction_quality_status(results)
         self._store_quality(
             invoice,
             results,
-            status="PASSED" if clean else "FAILED",
+            status=quality_status,
             retry_count=retry_count,
             review_reason=None,
         )
@@ -532,6 +582,8 @@ class ExtractionQualityService:
             ),
             {
                 "failed_rule_codes": failed_codes,
+                "warning_rule_codes": warning_codes,
+                "extraction_quality_status": quality_status,
                 "retry_attempt": retry_count,
             },
         )
@@ -621,7 +673,10 @@ class ExtractionQualityService:
         raw = dict(invoice.extraction_raw or {})
         raw["extraction_quality"] = {
             "status": status,
+            "extraction_quality_status": status,
             "failed_rules": self._failed_codes(results),
+            "failed_error_rules": self._failed_codes(results),
+            "warning_rules": self._warning_codes(results),
             "retry_count": retry_count,
             "review_reason": review_reason,
             "results": results,
@@ -654,6 +709,14 @@ class ExtractionQualityService:
         ]
 
     @staticmethod
+    def _warning_codes(results: list[dict[str, Any]]) -> list[str]:
+        return [
+            result["rule_code"]
+            for result in results
+            if not result["passed"] and result["severity"] == "WARNING"
+        ]
+
+    @staticmethod
     def _missing_fields(results: list[dict[str, Any]]) -> list[str]:
         field_by_rule = {
             "OCR-001": "invoice_number",
@@ -668,5 +731,9 @@ class ExtractionQualityService:
         return [
             field_by_rule[result["rule_code"]]
             for result in results
-            if not result["passed"] and result["rule_code"] in field_by_rule
+            if (
+                not result["passed"]
+                and result["severity"] == "ERROR"
+                and result["rule_code"] in field_by_rule
+            )
         ]

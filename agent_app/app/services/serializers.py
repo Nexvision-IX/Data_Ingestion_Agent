@@ -34,9 +34,16 @@ def invoice_payload(invoice: Invoice) -> dict:
             "tax_amount": invoice.tax_amount,
             "payment_terms": invoice.payment_terms,
             "extraction_confidence": invoice.extraction_confidence,
-            "extraction_quality_status": quality.get("status"),
+            "extraction_quality_status": quality.get(
+                "extraction_quality_status",
+                quality.get("status"),
+            ),
             "extraction_quality_failed_rules": quality.get(
-                "failed_rules", []
+                "failed_error_rules",
+                quality.get("failed_rules", []),
+            ),
+            "extraction_quality_warning_rules": quality.get(
+                "warning_rules", []
             ),
             "extraction_retry_count": quality.get("retry_count", 0),
             "extraction_review_reason": quality.get("review_reason"),

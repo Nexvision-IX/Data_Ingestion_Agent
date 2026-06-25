@@ -8,12 +8,20 @@ from app.integrations.llm.base import LLMClient
 
 RULE_TO_CATEGORY = {
     **{
-        f"OCR-{index:03d}": (
+        rule_code: (
             "EXTRACTION_QUALITY_ISSUE",
             "HIGH",
             "AP_OCR_REVIEW",
         )
-        for index in range(1, 11)
+        for rule_code in (
+            "OCR-001",
+            "OCR-002",
+            "OCR-004",
+            "OCR-005",
+            "OCR-006",
+            "OCR-008",
+            "OCR-009",
+        )
     },
     "AP-001": ("PO_MISSING", "HIGH", "PROCUREMENT"),
     "PO-001": ("PO_STATUS_INVALID", "HIGH", "PROCUREMENT"),
