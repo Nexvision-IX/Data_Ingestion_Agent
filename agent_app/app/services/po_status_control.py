@@ -1,66 +1,15 @@
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from app.rules.validation import RuleResult
+from app.services.status_catalog_service import (
+    VALID_PO_STATUSES_FOR_INVOICING,
+    normalize_po_status,
+)
 
 
-VALID_PO_STATUSES = frozenset({"OPEN", "PARTIAL"})
-_STATUS_SEPARATOR = re.compile(r"[^A-Z0-9]+")
-
-_OPEN_STATUSES = {
-    "OPEN",
-    "RELEASED",
-    "APPROVED",
-    "ACTIVE",
-}
-_PARTIAL_STATUSES = {
-    "PARTIAL",
-    "PARTIALLY OPEN",
-    "PARTIALLY RECEIVED",
-    "PARTIAL RECEIVED",
-}
-_PENDING_STATUSES = {
-    "PENDING",
-    "DRAFT",
-    "AWAITING APPROVAL",
-    "PENDING APPROVAL",
-    "UNRELEASED",
-}
-_CLOSED_STATUSES = {
-    "CLOSED",
-    "FULLY INVOICED",
-    "COMPLETED",
-}
-_INVALID_STATUSES = {
-    "CANCELLED",
-    "CANCELED",
-    "REJECTED",
-    "BLOCKED",
-    "ON HOLD",
-    "VOID",
-    "INACTIVE",
-}
-
-
-def _status_key(value: Any) -> str:
-    return _STATUS_SEPARATOR.sub(" ", str(value or "").upper()).strip()
-
-
-def normalize_po_status(value: Any) -> str:
-    status = _status_key(value)
-    if status in _OPEN_STATUSES:
-        return "OPEN"
-    if status in _PARTIAL_STATUSES:
-        return "PARTIAL"
-    if status in _PENDING_STATUSES:
-        return "PENDING"
-    if status in _CLOSED_STATUSES:
-        return "CLOSED"
-    if status in _INVALID_STATUSES:
-        return "INVALID"
-    return "UNKNOWN"
+VALID_PO_STATUSES = VALID_PO_STATUSES_FOR_INVOICING
 
 
 def normalize_po(po: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -72,6 +21,11 @@ def normalize_po(po: dict[str, Any] | None) -> dict[str, Any] | None:
         raw_status = po.get("status")
     normalized["raw_status"] = raw_status
     normalized["status"] = normalize_po_status(raw_status)
+    normalized["po_status_raw"] = raw_status
+    normalized["po_status_normalized"] = normalized["status"]
+    normalized["po_valid_for_invoicing"] = (
+        normalized["status"] in VALID_PO_STATUSES
+    )
     return normalized
 
 

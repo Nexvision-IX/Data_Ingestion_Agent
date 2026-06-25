@@ -11,8 +11,8 @@ from sqlalchemy.engine import Connection
 
 from app.integrations.sap.base import SAPGateway
 from app.models import Invoice
-from app.services.grn_status_control import normalize_grn_status
-from app.services.po_status_control import normalize_po_status
+from app.services.grn_status_control import normalize_grn
+from app.services.po_status_control import normalize_po
 from app.services.vendor_master_control import normalize_vendor
 
 
@@ -142,7 +142,7 @@ class APMasterGateway(SAPGateway):
         vendor_name = row.get("vendor_name") or ""
         raw_status = row.get("po_status")
         raw_json = _load_object(row.get("raw_json"))
-        return {
+        return normalize_po({
             "po_number": row.get("po_number"),
             "vendor_number": _vendor_key(vendor_name),
             "vendor_name": vendor_name,
@@ -160,10 +160,10 @@ class APMasterGateway(SAPGateway):
                 else None
             ),
             "payment_terms": raw_json.get("payment_terms"),
-            "status": normalize_po_status(raw_status),
+            "status": raw_status,
             "raw_status": raw_status,
             "items": items,
-        }
+        })
 
     def _get_grns(
         self,
@@ -191,20 +191,19 @@ class APMasterGateway(SAPGateway):
         for row in rows:
             raw_items = _load_items(row.get("items_json"))
             raw_status = row.get("gr_status")
-            normalized_status = normalize_grn_status(raw_status)
             for idx, item in enumerate(raw_items, start=1):
                 line_no = item.get("line_no") or idx
-                output.append(
+                output.append(normalize_grn(
                     {
                         "grn_number": row.get("gr_number"),
                         "po_number": row.get("po_number"),
                         "gr_date": row.get("gr_date"),
                         "po_item": f"{int(line_no):05d}",
                         "received_quantity": float(item.get("qty") or 0),
-                        "status": normalized_status,
+                        "status": raw_status,
                         "raw_status": raw_status,
                     }
-                )
+                ))
 
         return output
 

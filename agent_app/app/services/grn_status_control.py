@@ -1,54 +1,15 @@
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from app.rules.validation import RuleResult
+from app.services.status_catalog_service import (
+    VALID_GRN_STATUSES_FOR_INVOICING,
+    normalize_grn_status,
+)
 
 
-VALID_GRN_STATUSES = frozenset({"POSTED", "PARTIAL"})
-_STATUS_SEPARATOR = re.compile(r"[^A-Z0-9]+")
-
-_POSTED_STATUSES = {
-    "RECEIVED",
-    "POSTED",
-    "COMPLETED",
-    "APPROVED",
-}
-_PARTIAL_STATUSES = {
-    "PARTIAL",
-    "PARTIALLY RECEIVED",
-    "PARTIAL RECEIVED",
-}
-_PENDING_STATUSES = {
-    "PENDING",
-    "DRAFT",
-    "OPEN",
-}
-_INVALID_STATUSES = {
-    "CANCELLED",
-    "CANCELED",
-    "REVERSED",
-    "REJECTED",
-    "VOID",
-}
-
-
-def _status_key(value: Any) -> str:
-    return _STATUS_SEPARATOR.sub(" ", str(value or "").upper()).strip()
-
-
-def normalize_grn_status(value: Any) -> str:
-    status = _status_key(value)
-    if status in _POSTED_STATUSES:
-        return "POSTED"
-    if status in _PARTIAL_STATUSES:
-        return "PARTIAL"
-    if status in _PENDING_STATUSES:
-        return "PENDING"
-    if status in _INVALID_STATUSES:
-        return "INVALID"
-    return "UNKNOWN"
+VALID_GRN_STATUSES = VALID_GRN_STATUSES_FOR_INVOICING
 
 
 def normalize_grn(grn: dict[str, Any]) -> dict[str, Any]:
@@ -58,6 +19,11 @@ def normalize_grn(grn: dict[str, Any]) -> dict[str, Any]:
         raw_status = grn.get("status")
     normalized["raw_status"] = raw_status
     normalized["status"] = normalize_grn_status(raw_status)
+    normalized["grn_status_raw"] = raw_status
+    normalized["grn_status_normalized"] = normalized["status"]
+    normalized["grn_valid_for_invoicing"] = (
+        normalized["status"] in VALID_GRN_STATUSES
+    )
     return normalized
 
 

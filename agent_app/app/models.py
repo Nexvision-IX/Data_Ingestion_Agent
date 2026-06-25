@@ -38,6 +38,15 @@ class Invoice(Base):
     total_amount: Mapped[float] = mapped_column(Float, default=0)
     payment_terms: Mapped[str | None] = mapped_column(String(50), nullable=True)
     status: Mapped[str] = mapped_column(String(60), default="RECEIVED", index=True)
+    posting_status: Mapped[str] = mapped_column(
+        String(40), default="NOT_POSTED", server_default="NOT_POSTED", index=True
+    )
+    payment_status: Mapped[str] = mapped_column(
+        String(40), default="UNKNOWN", server_default="UNKNOWN", index=True
+    )
+    raw_payment_status: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )
     extraction_confidence: Mapped[float] = mapped_column(Float, default=0)
     extraction_raw: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)

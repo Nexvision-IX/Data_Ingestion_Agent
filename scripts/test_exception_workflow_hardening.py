@@ -38,6 +38,9 @@ def main() -> int:
             owner_for_category,
             recheck_eligibility,
         )
+        from app.services.status_catalog_service import (
+            close_exception_without_cancelling_invoice,
+        )
 
         try:
             Base.metadata.create_all(engine)
@@ -185,6 +188,31 @@ def main() -> int:
                 assert financial_exception.recheck_count == (
                     recheck_count_before
                 )
+
+                workflow_status_before_close = invoice.status
+                close_exception_without_cancelling_invoice(
+                    invoice,
+                    financial_exception,
+                    "The exception case was administratively closed.",
+                )
+                db.commit()
+                assert financial_exception.status == "CLOSED"
+                assert invoice.status == workflow_status_before_close
+                close_event = db.scalar(
+                    select(WorkflowEvent)
+                    .where(
+                        WorkflowEvent.invoice_id == invoice.id,
+                        WorkflowEvent.event_type == "EXCEPTION_CLOSED",
+                    )
+                    .order_by(WorkflowEvent.created_at.desc())
+                )
+                assert close_event is not None
+                assert close_event.metadata_json[
+                    "invoice_status_changed"
+                ] is False
+                assert close_event.metadata_json[
+                    "invoice_workflow_status"
+                ] == workflow_status_before_close
 
                 assert owner_for_category(
                     "PO_GRN_CONSUMPTION_EXCEEDED"

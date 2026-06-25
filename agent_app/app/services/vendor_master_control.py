@@ -5,20 +5,13 @@ from typing import Any
 
 from app.models import Invoice
 from app.rules.validation import RuleResult
+from app.services.status_catalog_service import (
+    ACTIVE_VENDOR_STATUSES,
+    normalize_vendor_status,
+)
 
 
 _NON_ALPHANUMERIC = re.compile(r"[^A-Z0-9]+")
-_STATUS_SEPARATOR = re.compile(r"[^A-Z0-9]+")
-
-_ACTIVE_STATUSES = {"ACTIVE", "APPROVED", "ENABLED"}
-_BLOCKED_STATUSES = {
-    "BLOCKED",
-    "SUSPENDED",
-    "ON HOLD",
-    "PAYMENT HOLD",
-}
-_INACTIVE_STATUSES = {"INACTIVE", "DISABLED", "CLOSED"}
-_PENDING_STATUSES = {"PENDING", "DRAFT", "UNDER REVIEW"}
 
 _TAX_FIELDS = ("tax_id", "tax_number", "gstin", "vat_number")
 _PAYMENT_FIELDS = (
@@ -33,22 +26,6 @@ def normalize_vendor_identity(value: Any) -> str:
     return _NON_ALPHANUMERIC.sub("", str(value or "").upper())
 
 
-def normalize_vendor_status(value: Any) -> str:
-    status = _STATUS_SEPARATOR.sub(
-        " ",
-        str(value or "").upper(),
-    ).strip()
-    if status in _ACTIVE_STATUSES:
-        return "ACTIVE"
-    if status in _BLOCKED_STATUSES:
-        return "BLOCKED"
-    if status in _INACTIVE_STATUSES:
-        return "INACTIVE"
-    if status in _PENDING_STATUSES:
-        return "PENDING"
-    return "UNKNOWN"
-
-
 def normalize_vendor(
     vendor: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
@@ -60,6 +37,11 @@ def normalize_vendor(
         raw_status = vendor.get("status")
     normalized["raw_status"] = raw_status
     normalized["status"] = normalize_vendor_status(raw_status)
+    normalized["vendor_status_raw"] = raw_status
+    normalized["vendor_status_normalized"] = normalized["status"]
+    normalized["vendor_active_for_payment"] = (
+        normalized["status"] in ACTIVE_VENDOR_STATUSES
+    )
     return normalized
 
 

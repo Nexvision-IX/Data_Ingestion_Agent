@@ -42,6 +42,12 @@ REQUIRED_AGENT_TABLES = {
     "workflow_events",
     "po_grn_consumption_ledger",
 }
+REQUIRED_INVOICE_COLUMNS = {
+    "status",
+    "posting_status",
+    "payment_status",
+    "raw_payment_status",
+}
 
 
 def _database_mode(url: str) -> str:
@@ -55,6 +61,19 @@ def _missing_tables(engine, required: set[str], schema: str | None) -> list[str]
         for table_name in required
         if not inspector.has_table(table_name, schema=schema)
     )
+
+
+def _missing_columns(
+    engine,
+    table_name: str,
+    required: set[str],
+    schema: str | None = None,
+) -> list[str]:
+    existing = {
+        column["name"]
+        for column in inspect(engine).get_columns(table_name, schema=schema)
+    }
+    return sorted(required - existing)
 
 
 def main() -> int:
@@ -94,8 +113,9 @@ def main() -> int:
         )
 
     try:
+        agent_engine = get_agent_engine()
         missing_agent = _missing_tables(
-            get_agent_engine(),
+            agent_engine,
             REQUIRED_AGENT_TABLES,
             None,
         )
@@ -107,6 +127,21 @@ def main() -> int:
             )
         else:
             print("[SUCCESS] All required agent tables exist.")
+            missing_invoice_columns = _missing_columns(
+                agent_engine,
+                "invoices",
+                REQUIRED_INVOICE_COLUMNS,
+            )
+            if missing_invoice_columns:
+                success = False
+                print(
+                    "[FAILURE] Missing invoices columns: "
+                    + ", ".join(missing_invoice_columns)
+                )
+            else:
+                print(
+                    "[SUCCESS] All required invoice status columns exist."
+                )
     except Exception as exc:
         success = False
         print(

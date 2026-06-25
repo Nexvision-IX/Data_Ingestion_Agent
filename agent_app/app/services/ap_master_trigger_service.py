@@ -24,6 +24,14 @@ from app.models import (
 from app.services.po_grn_consumption_ledger_service import (
     POGRNConsumptionLedgerService,
 )
+from app.services.status_catalog_service import (
+    InvoicePostingStatus,
+    InvoiceWorkflowStatus,
+    InvalidInvoiceStatusTransition,
+    normalize_payment_status,
+    set_invoice_status_without_transition,
+    transition_invoice_status,
+)
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
@@ -34,17 +42,18 @@ from ap_database.master_models import InvoiceMaster, SapPostedInvoiceMaster
 
 SAFE_REPROCESS_STATUSES = frozenset(
     {
-        "RECEIVED",
-        "EXTRACTED",
+        InvoiceWorkflowStatus.RECEIVED,
+        InvoiceWorkflowStatus.EXTRACTED,
         "SAP_DATA_PENDING",
-        "VALIDATION_IN_PROGRESS",
+        InvoiceWorkflowStatus.VALIDATION_IN_PROGRESS,
         "VALIDATION_FAILED",
         "FAILED",
-        "EXCEPTION_IDENTIFIED",
+        InvoiceWorkflowStatus.EXCEPTION_IDENTIFIED,
         "RECHECK_PENDING",
-        "READY_FOR_POSTING",
-        "POSTING_FAILED",
-        "REPROCESS_FAILED",
+        InvoiceWorkflowStatus.READY_FOR_POSTING,
+        InvoiceWorkflowStatus.POSTING_FAILED,
+        InvoiceWorkflowStatus.REPROCESS_REQUESTED,
+        InvoiceWorkflowStatus.REPROCESS_FAILED,
     }
 )
 
@@ -326,7 +335,22 @@ class APMasterTriggerService:
                     "the AP Agent invoice row could not be reloaded."
                 ) from exc
 
-            failed_invoice.status = "REPROCESS_FAILED"
+            try:
+                transition_invoice_status(
+                    failed_invoice,
+                    InvoiceWorkflowStatus.REPROCESS_FAILED,
+                    "Controlled invoice reprocessing failed.",
+                    actor="APMasterTriggerService",
+                    metadata={"error": str(exc)},
+                )
+            except InvalidInvoiceStatusTransition:
+                set_invoice_status_without_transition(
+                    failed_invoice,
+                    InvoiceWorkflowStatus.REPROCESS_FAILED,
+                    "Legacy invoice status repaired after reprocess failure.",
+                    actor="APMasterTriggerService",
+                    metadata={"error": str(exc), "legacy_status_repair": True},
+                )
             POGRNConsumptionLedgerService(self.db).release(
                 failed_invoice,
                 "Reprocessing failed.",
@@ -458,7 +482,11 @@ class APMasterTriggerService:
                 if isinstance(raw_json, dict)
                 else None
             ),
-            status="EXTRACTED",
+            posting_status=InvoicePostingStatus.NOT_POSTED,
+            payment_status=normalize_payment_status(
+                row.get("payment_status")
+            ),
+            raw_payment_status=row.get("payment_status"),
             extraction_confidence=1.0,
             extraction_raw={
                 "source": "invoice_master",
@@ -475,6 +503,13 @@ class APMasterTriggerService:
 
         self.db.add(invoice)
         self.db.flush()
+        set_invoice_status_without_transition(
+            invoice,
+            InvoiceWorkflowStatus.EXTRACTED,
+            "Invoice initialized from AP master extracted data.",
+            actor="APMasterTriggerService",
+            metadata={"initialization": True},
+        )
         self._add_invoice_lines(invoice, row)
 
         self.db.add(
@@ -595,7 +630,18 @@ class APMasterTriggerService:
             if isinstance(raw_json, dict)
             else None
         )
-        invoice.status = "EXTRACTED"
+        invoice.posting_status = InvoicePostingStatus.NOT_POSTED
+        invoice.raw_payment_status = row.get("payment_status")
+        invoice.payment_status = normalize_payment_status(
+            invoice.raw_payment_status
+        )
+        set_invoice_status_without_transition(
+            invoice,
+            InvoiceWorkflowStatus.EXTRACTED,
+            "Invoice reset to extracted state from AP master source.",
+            actor="APMasterTriggerService",
+            metadata={"controlled_reprocess": True},
+        )
         invoice.extraction_confidence = 1.0
         invoice.extraction_raw = {
             "source": "invoice_master",

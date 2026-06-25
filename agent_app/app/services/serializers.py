@@ -14,6 +14,10 @@ def invoice_summary(invoice: Invoice) -> dict:
         "currency": invoice.currency,
         "total_amount": invoice.total_amount,
         "status": invoice.status,
+        "workflow_status": invoice.status,
+        "posting_status": invoice.posting_status or "NOT_POSTED",
+        "payment_status": invoice.payment_status or "UNKNOWN",
+        "raw_payment_status": invoice.raw_payment_status,
         "created_at": invoice.created_at.isoformat(),
         "updated_at": invoice.updated_at.isoformat(),
     }

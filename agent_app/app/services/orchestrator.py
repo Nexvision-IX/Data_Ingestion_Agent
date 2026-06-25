@@ -44,6 +44,15 @@ from app.services.exception_summary_service import (
     ExceptionSummaryService,
     owner_for_category,
 )
+from app.services.status_catalog_service import (
+    close_exception_without_cancelling_invoice,
+    InvoicePaymentStatus,
+    InvoicePostingStatus,
+    InvoiceWorkflowStatus,
+    InvalidInvoiceStatusTransition,
+    set_invoice_status_without_transition,
+    transition_invoice_status,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -89,7 +98,6 @@ class APOrchestrator:
         )
 
     def process(self, invoice: Invoice) -> Invoice:
-        invoice.status = "SAP_DATA_PENDING"
         self._event(
             invoice,
             "SAP_FETCH_STARTED",
@@ -110,7 +118,32 @@ class APOrchestrator:
             {"source": context.get("source")},
         )
 
-        invoice.status = "VALIDATION_IN_PROGRESS"
+        try:
+            transition_invoice_status(
+                invoice,
+                InvoiceWorkflowStatus.VALIDATION_IN_PROGRESS,
+                "Deterministic AP validation started.",
+                actor="APOrchestrator",
+                allow_same=True,
+            )
+        except InvalidInvoiceStatusTransition:
+            # Legacy workflow-only statuses predate the CP-16 catalog.
+            if invoice.status not in {
+                "SAP_DATA_PENDING",
+                "VALIDATION_FAILED",
+                "FAILED",
+                "RECHECK_PENDING",
+                "WAITING_FOR_RESPONSE",
+                "ESCALATED",
+            }:
+                raise
+            set_invoice_status_without_transition(
+                invoice,
+                InvoiceWorkflowStatus.VALIDATION_IN_PROGRESS,
+                "Legacy invoice status normalized before validation.",
+                actor="APOrchestrator",
+                metadata={"legacy_status_repair": True},
+            )
         self.db.execute(
             delete(ValidationResult).where(
                 ValidationResult.invoice_id == invoice.id
@@ -152,7 +185,12 @@ class APOrchestrator:
         )
 
         if self.validator.is_clean(results):
-            invoice.status = "READY_FOR_POSTING"
+            transition_invoice_status(
+                invoice,
+                InvoiceWorkflowStatus.READY_FOR_POSTING,
+                "Invoice passed all blocking deterministic controls.",
+                actor="DecisionAgent",
+            )
             self._event(
                 invoice,
                 "INVOICE_CLEAN",
@@ -252,7 +290,12 @@ class APOrchestrator:
             self.db.add(exception)
             self.db.flush()
 
-        invoice.status = "EXCEPTION_IDENTIFIED"
+        transition_invoice_status(
+            invoice,
+            InvoiceWorkflowStatus.EXCEPTION_IDENTIFIED,
+            "Invoice entered the exception workflow.",
+            actor="DecisionAgent",
+        )
 
         self._event(
             invoice,
@@ -474,7 +517,12 @@ class APOrchestrator:
         )
 
         if decision.decision == "REVALIDATE":
-            invoice.status = "RECHECK_PENDING"
+            transition_invoice_status(
+                invoice,
+                InvoiceWorkflowStatus.REPROCESS_REQUESTED,
+                "Eligible exception was queued for deterministic revalidation.",
+                actor="RecheckAgent",
+            )
             self.db.commit()
 
             invoice = self.process(invoice)
@@ -493,8 +541,6 @@ class APOrchestrator:
                 )
 
         elif decision.decision == "WAIT":
-            invoice.status = "WAITING_FOR_RESPONSE"
-
             self.create_communication(
                 exception,
                 CommunicationRequest(
@@ -507,7 +553,6 @@ class APOrchestrator:
             )
 
         elif decision.decision == "ESCALATE":
-            invoice.status = "ESCALATED"
             exception.status = "ESCALATED"
 
             self._event(
@@ -518,13 +563,9 @@ class APOrchestrator:
             )
 
         elif decision.decision == "CLOSE":
-            invoice.status = "CLOSED"
-            exception.status = "CLOSED"
-
-            self._event(
+            close_exception_without_cancelling_invoice(
                 invoice,
-                "INVOICE_CLOSED",
-                "RecheckAgent",
+                exception,
                 decision.next_action,
             )
 
@@ -638,8 +679,10 @@ class APOrchestrator:
             "vat_percent": vat_percent,
             "document_total": invoice.total_amount,
             "amount": invoice.total_amount,
-            "payment_status": "Posted",
-            "posting_status": "POSTED",
+            "payment_status": (
+                invoice.payment_status or InvoicePaymentStatus.UNKNOWN
+            ),
+            "posting_status": InvoicePostingStatus.POSTED,
             "sap_document_number": sap_document_number,
             "posting_message": posting_message,
             "source_system": "AP_AGENT",
@@ -772,7 +815,20 @@ class APOrchestrator:
         live_check = self.sap.pre_post_check(invoice)
 
         if not live_check.get("ok"):
-            invoice.status = "POSTING_FAILED"
+            transition_invoice_status(
+                invoice,
+                InvoiceWorkflowStatus.POSTING_IN_PROGRESS,
+                "Invoice posting pre-check started.",
+                actor="PostingService",
+            )
+            invoice.posting_status = InvoicePostingStatus.POSTING_IN_PROGRESS
+            transition_invoice_status(
+                invoice,
+                InvoiceWorkflowStatus.POSTING_FAILED,
+                "Posting pre-check failed.",
+                actor="PostingService",
+            )
+            invoice.posting_status = InvoicePostingStatus.POSTING_FAILED
 
             attempt = PostingAttempt(
                 invoice_id=invoice.id,
@@ -798,7 +854,13 @@ class APOrchestrator:
 
             return
 
-        invoice.status = "POSTING_IN_PROGRESS"
+        transition_invoice_status(
+            invoice,
+            InvoiceWorkflowStatus.POSTING_IN_PROGRESS,
+            "Invoice posting started.",
+            actor="PostingService",
+        )
+        invoice.posting_status = InvoicePostingStatus.POSTING_IN_PROGRESS
 
         try:
             result = self.posting.post_invoice(
@@ -806,7 +868,14 @@ class APOrchestrator:
                 live_check["context"],
             )
         except Exception as exc:
-            invoice.status = "POSTING_FAILED"
+            transition_invoice_status(
+                invoice,
+                InvoiceWorkflowStatus.POSTING_FAILED,
+                "Posting raised an exception.",
+                actor="PostingService",
+                metadata={"error": str(exc)},
+            )
+            invoice.posting_status = InvoicePostingStatus.POSTING_FAILED
             attempt = PostingAttempt(
                 invoice_id=invoice.id,
                 status="FAILED",
@@ -840,10 +909,24 @@ class APOrchestrator:
 
         self.db.add(attempt)
 
-        invoice.status = (
-            "POSTED"
+        new_workflow_status = (
+            InvoiceWorkflowStatus.POSTED
             if result["success"]
-            else "POSTING_FAILED"
+            else InvoiceWorkflowStatus.POSTING_FAILED
+        )
+        transition_invoice_status(
+            invoice,
+            new_workflow_status,
+            result["message"],
+            actor="PostingService",
+            metadata={
+                "sap_document_number": result.get("sap_document_number")
+            },
+        )
+        invoice.posting_status = (
+            InvoicePostingStatus.POSTED
+            if result["success"]
+            else InvoicePostingStatus.POSTING_FAILED
         )
 
         self._event(

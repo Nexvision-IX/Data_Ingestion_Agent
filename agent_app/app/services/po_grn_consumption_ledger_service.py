@@ -15,11 +15,19 @@ from app.services.grn_status_control import (
     VALID_GRN_STATUSES,
     normalize_grn,
 )
+from app.services.status_catalog_service import (
+    ACTIVE_LEDGER_STATUSES,
+    LedgerStatus,
+)
 
 
-ACTIVE_LEDGER_STATUSES = frozenset({"RESERVED", "CONSUMED"})
 LEDGER_STATUSES = frozenset(
-    {"RESERVED", "CONSUMED", "RELEASED", "REVERSED"}
+    {
+        LedgerStatus.RESERVED,
+        LedgerStatus.CONSUMED,
+        LedgerStatus.RELEASED,
+        LedgerStatus.REVERSED,
+    }
 )
 LEDGER_SOURCES = frozenset(
     {"AP_AGENT", "POSTED_MASTER", "MANUAL_ADJUSTMENT"}
@@ -96,7 +104,7 @@ class POGRNConsumptionLedgerService:
                 ),
                 quantity=quantity,
                 amount=amount,
-                ledger_status="RESERVED",
+                ledger_status=LedgerStatus.RESERVED,
                 source="AP_AGENT",
                 reason=reason,
             )
@@ -124,9 +132,9 @@ class POGRNConsumptionLedgerService:
         invoice: Invoice,
         reason: str = "Invoice posting succeeded.",
     ) -> list[POGRNConsumptionLedger]:
-        rows = self._rows(invoice.id, {"RESERVED"})
+        rows = self._rows(invoice.id, {LedgerStatus.RESERVED})
         for row in rows:
-            row.ledger_status = "CONSUMED"
+            row.ledger_status = LedgerStatus.CONSUMED
             row.reason = reason
         if rows:
             self._event(
@@ -145,9 +153,9 @@ class POGRNConsumptionLedgerService:
         invoice: Invoice,
         reason: str,
     ) -> list[POGRNConsumptionLedger]:
-        rows = self._rows(invoice.id, {"RESERVED"})
+        rows = self._rows(invoice.id, {LedgerStatus.RESERVED})
         for row in rows:
-            row.ledger_status = "RELEASED"
+            row.ledger_status = LedgerStatus.RELEASED
             row.active_key = None
             row.reason = reason
         if rows:
@@ -170,9 +178,9 @@ class POGRNConsumptionLedgerService:
         invoice: Invoice,
         reason: str,
     ) -> list[POGRNConsumptionLedger]:
-        rows = self._rows(invoice.id, {"CONSUMED"})
+        rows = self._rows(invoice.id, {LedgerStatus.CONSUMED})
         for row in rows:
-            row.ledger_status = "REVERSED"
+            row.ledger_status = LedgerStatus.REVERSED
             row.active_key = None
             row.reason = reason
         if rows:

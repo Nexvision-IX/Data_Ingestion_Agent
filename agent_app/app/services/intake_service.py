@@ -12,6 +12,10 @@ from app.agents.extraction_agent import MockExtractionAgent
 from app.config import settings
 from app.models import Invoice, InvoiceLine, WorkflowEvent
 from app.schemas import ExtractedInvoice
+from app.services.status_catalog_service import (
+    InvoiceWorkflowStatus,
+    set_invoice_status_without_transition,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -122,7 +126,6 @@ class IntakeService:
             tax_amount=extracted.tax_amount,
             total_amount=extracted.total_amount,
             payment_terms=extracted.payment_terms,
-            status="EXTRACTED",
             extraction_confidence=extracted.confidence,
             extraction_raw={
                 **extracted.raw,
@@ -144,6 +147,13 @@ class IntakeService:
 
         self.db.add(invoice)
         self.db.flush()
+        set_invoice_status_without_transition(
+            invoice,
+            InvoiceWorkflowStatus.EXTRACTED,
+            "Invoice initialized from extracted document data.",
+            actor="IntakeService",
+            metadata={"initialization": True, "source": source},
+        )
         self.db.add(
             WorkflowEvent(
                 invoice_id=invoice.id,
