@@ -63,3 +63,20 @@ class CommunicationRequest(BaseModel):
     recipient: str | None = None
     send: bool = False
     context: str | None = None
+
+
+class ExceptionResponseIntakeRequest(BaseModel):
+    exception_id: str | None = None
+    communication_id: str | None = None
+    source: Literal[
+        "MANUAL_TEST",
+        "PROCUREMENT",
+        "VENDOR",
+        "AP",
+        "MASTER_DATA",
+        "ERP",
+    ] = "MANUAL_TEST"
+    response_text: str = Field(min_length=1)
+    provided_by: str | None = None
+    values: dict[str, Any] | None = None
+    resume_recheck: bool = False

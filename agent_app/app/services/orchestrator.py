@@ -356,6 +356,12 @@ class APOrchestrator:
             exception_summary=exception_summary,
             context=request.context,
         )
+        correlation_footer = (
+            "\n\nReference\n"
+            f"Exception ID: {exception.id}\n"
+            f"Invoice Number: {invoice.invoice_number}"
+        )
+        correlated_body = draft.body + correlation_footer
 
         '''default_recipient = invoice.extraction_raw.get(
             "vendor_email",
@@ -384,7 +390,7 @@ class APOrchestrator:
             delivery = self.smtp.send(
                 recipient=recipient,
                 subject=draft.subject,
-                body=draft.body,
+                body=correlated_body,
             )
         else:
             delivery = {
@@ -399,7 +405,7 @@ class APOrchestrator:
             direction="OUTBOUND",
             recipient=recipient,
             subject=draft.subject,
-            body=draft.body,
+            body=correlated_body,
             status=delivery["status"],
             smtp_message_id=delivery.get("message_id"),
         )
@@ -427,6 +433,8 @@ class APOrchestrator:
                 "recipient_role": draft.recipient_role,
                 "requested_action": draft.requested_action,
                 "delivery_status": delivery["status"],
+                "exception_id": exception.id,
+                "invoice_number": invoice.invoice_number,
             },
         )
 

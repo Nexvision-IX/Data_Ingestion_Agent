@@ -26,7 +26,13 @@ from app.integrations.sap.mock import MockSAPGateway
 from app.models import ExceptionCase, Invoice
 from app.schemas import (
     CommunicationRequest,
+    ExceptionResponseIntakeRequest,
     RecheckRequest,
+)
+from app.services.exception_response_intake_service import (
+    ExceptionResponseCorrelationError,
+    ExceptionResponseIntakeError,
+    ExceptionResponseIntakeService,
 )
 from app.services.intake_service import IntakeService
 from app.services.orchestrator import APOrchestrator
@@ -237,6 +243,55 @@ def communicate(
         "subject": communication.subject,
         "body": communication.body,
     }
+
+
+@router.post("/exceptions/{exception_id}/responses")
+def record_exception_response(
+    exception_id: str,
+    request: ExceptionResponseIntakeRequest,
+    db: Session = Depends(get_db),
+):
+    exception = db.scalar(
+        select(ExceptionCase)
+        .where(ExceptionCase.id == exception_id)
+        .options(
+            selectinload(ExceptionCase.invoice).selectinload(
+                Invoice.lines
+            ),
+            selectinload(ExceptionCase.invoice).selectinload(
+                Invoice.validations
+            ),
+            selectinload(ExceptionCase.invoice).selectinload(
+                Invoice.exceptions
+            ),
+            selectinload(ExceptionCase.invoice).selectinload(
+                Invoice.communications
+            ),
+            selectinload(ExceptionCase.invoice).selectinload(
+                Invoice.events
+            ),
+            selectinload(ExceptionCase.invoice).selectinload(
+                Invoice.postings
+            ),
+        )
+    )
+    if not exception:
+        raise HTTPException(status_code=404, detail="Exception not found")
+
+    try:
+        result = ExceptionResponseIntakeService(
+            db,
+            orchestrator_factory=APOrchestrator,
+        ).ingest_response(exception, request)
+    except ExceptionResponseCorrelationError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ExceptionResponseIntakeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return invoice_detail(
+        _load_invoice(db, result["invoice"].id)
+    )
+
 
 @router.post("/integrations/ap-master/process-new")
 def process_new_ap_master_invoices(
