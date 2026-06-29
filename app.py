@@ -457,7 +457,28 @@ def safe_dataframe(df, empty_message):
     if df is None or getattr(df, "empty", False):
         st.info(empty_message)
     else:
-        st.dataframe(df, use_container_width=True)
+        render_one_based_dataframe(df)
+
+
+def one_based_dataframe(data):
+    try:
+        import pandas as pd
+
+        if isinstance(data, pd.DataFrame):
+            display_df = data.copy()
+        else:
+            display_df = pd.DataFrame(data)
+        display_df.index = range(1, len(display_df) + 1)
+        display_df.index.name = "#"
+        return display_df
+    except Exception:
+        return data
+
+
+def render_one_based_dataframe(data, **kwargs):
+    options = {"use_container_width": True}
+    options.update(kwargs)
+    st.dataframe(one_based_dataframe(data), **options)
 
 
 def safe_table_count(table_name):
@@ -515,7 +536,7 @@ def business_dataframe(df, columns, empty_message):
     if not available_columns:
         st.info(empty_message)
         return
-    st.dataframe(df[available_columns], use_container_width=True)
+    render_one_based_dataframe(df[available_columns])
 
 
 def current_row_value(row, candidate_columns, default="—"):
@@ -587,6 +608,48 @@ def event_contains(events_df, tokens):
     return False
 
 
+def response_recheck_payment_terms_summary(events_df):
+    summary = {
+        "payment_terms": "—",
+        "master_updated": "No",
+        "master_target": "—",
+    }
+    if events_df is None or getattr(events_df, "empty", False):
+        return summary
+    for _, row in events_df.iterrows():
+        event_type = str(row.get("event_type", ""))
+        metadata = row.get("metadata_json", row.get("metadata", {}))
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except Exception:
+                metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        if event_type == "EXCEPTION_EVIDENCE_EXTRACTED":
+            evidence = metadata.get("evidence") or {}
+            terms = (
+                evidence.get("PAYMENT_TERMS_PROVIDED", {})
+                .get("payment_terms")
+                if isinstance(evidence, dict)
+                else None
+            )
+            if terms and summary["payment_terms"] == "—":
+                summary["payment_terms"] = terms
+        if event_type in {
+            "PAYMENT_TERMS_MASTER_UPDATED_FROM_RESPONSE",
+            "PAYMENT_TERMS_MASTER_UPDATED_FROM_RECHECK",
+        }:
+            summary["master_updated"] = "Yes"
+            summary["master_target"] = metadata.get(
+                "table_name",
+                metadata.get("target", "master data"),
+            )
+            if metadata.get("new_value"):
+                summary["payment_terms"] = metadata["new_value"]
+    return summary
+
+
 def is_blocking_failed_control(row):
     severity = str(row.get("severity", "")).upper()
     passed = str(row.get("passed", "")).lower()
@@ -628,8 +691,9 @@ def build_mock_response_template(template_name, selected_invoice_row, validation
             "Please use the attached evidence and recheck the tax control."
         ),
         "Supplier confirms payment terms": (
-            f"Payment terms for invoice {invoice_number} are confirmed as per the PO. "
-            "Please recheck the payment terms control."
+            f"Procurement confirms approved payment terms for {po_number} "
+            f"and {invoice_number} are NET 30. Please update the "
+            "PO/master payment terms and rerun validation."
         ),
         "General clarification": (
             f"Clarification received for invoice {invoice_number}. "
@@ -686,6 +750,7 @@ def render_extracted_business_fields(parsed_json):
         ("Vendor number", ["vendor_number", "supplier_number"]),
         ("PO number", ["po_number", "purchase_order", "po_no"]),
         ("Invoice date", ["invoice_date", "date"]),
+        ("Due date", ["due_date", "payment_due_date"]),
         ("Currency", ["currency"]),
         ("Subtotal", ["document_subtotal", "subtotal"]),
         ("Tax amount", ["tax_amount", "tax"]),
@@ -709,7 +774,7 @@ def render_extracted_business_fields(parsed_json):
     )
     if isinstance(line_items, list) and line_items:
         st.subheader("Line Items")
-        st.dataframe(line_items, use_container_width=True)
+        render_one_based_dataframe(line_items)
 
 
 def render_invoice_journey_tracker(selected_invoice, validation_df, communication_df, events_df):
@@ -2563,6 +2628,29 @@ def render_response_recheck_demo():
     after_event_count = 0 if events_df is None or events_df.empty else len(events_df)
     response_received = event_contains(events_df, ["RESPONSE", "EVIDENCE", "FIELD_UPDATED"])
     recheck_happened = event_contains(events_df, ["RECHECK", "REPROCESS"])
+    payment_terms_summary = response_recheck_payment_terms_summary(events_df)
+
+    st.subheader("Extracted Response Evidence")
+    render_metric_cards(
+        [
+            {
+                "title": "Approved terms",
+                "value": payment_terms_summary["payment_terms"],
+                "help_text": "Extracted from response evidence",
+            },
+            {
+                "title": "Master updated",
+                "value": payment_terms_summary["master_updated"],
+                "help_text": "PO/master or invoice master update event",
+            },
+            {
+                "title": "Update target",
+                "value": payment_terms_summary["master_target"],
+                "help_text": "Where payment terms were applied",
+            },
+        ],
+        columns=3,
+    )
 
     st.subheader("Before/After Demo Evidence")
     render_metric_cards(
@@ -2671,97 +2759,319 @@ def render_response_recheck_demo():
     )
 
 def render_reference_data_test_setup():
+    st.title("Reference Data & Test Setup")
     render_section_help(
-        "Use this page to prepare PO and GRN reference data before processing invoices."
-    )
-    st.header("Reference Data Sync")
-
-    st.info(
-        "Invoices are no longer synced from the API. "
-        "Invoices enter through PDF/Image upload or Manual Invoice Entry. "
-        "This page syncs only PO and GRN reference data."
+        "Use this page to prepare PO and GRN reference data for invoice validation. Invoices should normally enter through the Invoice Journey page using PDF/Image upload."
     )
 
-    st.write(
-        """
-        Sync structured reference records from:
-        - SAP Purchase Orders
-        - SAP GRNs
-        """
-    )
-
-    if st.button("Start Structured Sync"):
-        with st.spinner("Running structured ingestion..."):
-            try:
-                result = sync_structured_sources()
-                render_technical_details("Sync details", result)
-
-                status = result.get("status", "failed")
-                if status == "success":
-                    st.success("Structured ingestion completed.")
-                    details = result.get("details", {})
-
-                    col1, col2, col3 = st.columns(3)
-
-                    with col1:
-                        st.metric(
-                            "API Invoices Synced",
-                            details.get("invoice_count", 0)
-                        )
-                        st.caption(
-                            "Expected value is 0. "
-                            "Invoices are upload/manual-entry only."
-                        )
-
-                    with col2:
-                        st.metric(
-                            "PO Records Synced",
-                            details.get("po_count", 0)
-                        )
-
-                    with col3:
-                        st.metric(
-                            "GRN Records Synced",
-                            details.get("grn_count", 0)
-                        )
-
-                    st.info(
-                        f"Total Sync Time: {result.get('total_time_sec', 'N/A')} sec"
-                    )
-                else:
-                    st.error(
-                        f"Sync Failed: {result.get('error', result.get('message', 'Unknown error'))}"
-                    )
-            except Exception as e:
-                st.exception(e)
-
-
-    # ===================================
-    # INVOICE PROCESSING
-    # ===================================
-
-    st.header("Test Data Setup")
-
-    st.info(
-        "Manual invoice entry now writes directly to invoice_master "
-        "and triggers AP Agent. It does not create a source invoice API record. "
-        "PO and GRN entries still use the mock SAP API for reference data setup."
-    )
-
-    tab1, tab2, tab3 = st.tabs(
+    st.subheader("Reference Data Readiness")
+    mock_sap_status = api_health(API_BASE_URL)
+    po_count = safe_table_count("sap_po_master")
+    grn_count = safe_table_count("sap_grn_master")
+    invoice_count = safe_table_count("invoice_master")
+    render_metric_cards(
         [
-            "Create Manual Invoice",
+            {
+                "title": "Mock SAP API",
+                "value": mock_sap_status,
+                "help_text": "Used to create or sync PO and GRN records",
+            },
+            {
+                "title": "Master PO count",
+                "value": po_count,
+                "help_text": "Reference PO rows available for validation",
+            },
+            {
+                "title": "Master GRN count",
+                "value": grn_count,
+                "help_text": "Reference GRN rows available for matching",
+            },
+            {
+                "title": "Invoice count",
+                "value": invoice_count,
+                "help_text": "Invoices in the local master table",
+            },
+        ],
+        columns=4,
+    )
+    if po_count == 0:
+        st.warning("Create or sync PO data before testing PO validation.")
+    if grn_count == 0:
+        st.warning("Create or sync GRN data before testing GRN matching.")
+    if mock_sap_status != "Healthy":
+        st.warning("Start the Mock SAP API on port 8001 before creating or syncing PO/GRN records.")
+
+    st.subheader("Recommended Setup Flow")
+    st.markdown(
+        """
+        1. Create or seed PO records.
+        2. Create or seed GRN records.
+        3. Click Start Structured Sync.
+        4. Go to Invoice Journey and upload an invoice.
+        5. Use AP Agent Workbench or Response & Recheck Demo for investigation.
+        """
+    )
+
+    tab_sync, tab_po, tab_grn, tab_invoice, tab_tables = st.tabs(
+        [
+            "Structured Sync",
             "Create PO",
             "Create GRN",
+            "Manual Invoice Entry",
+            "Reference Tables",
         ]
     )
 
-    # ===================================
-    # CREATE INVOICE
-    # ===================================
-    with tab1:
+    with tab_sync:
+        st.subheader("Structured Sync")
+        st.info(
+            "Invoices are not synced from Mock API. Invoices enter through PDF/Image upload or manual entry."
+        )
+        st.write("Sync structured reference records from Mock SAP API into the local AP master reference tables.")
+
+        if st.button("Start Structured Sync", key="start_structured_sync_reference_setup"):
+            with st.spinner("Running structured ingestion..."):
+                try:
+                    result = sync_structured_sources()
+                    status = result.get("status", "failed")
+                    if status == "success":
+                        st.success("Structured ingestion completed.")
+                        details = result.get("details", {})
+                        render_metric_cards(
+                            [
+                                {
+                                    "title": "PO records synced",
+                                    "value": details.get("po_count", 0),
+                                    "help_text": "Purchase order reference rows",
+                                },
+                                {
+                                    "title": "GRN records synced",
+                                    "value": details.get("grn_count", 0),
+                                    "help_text": "Goods receipt reference rows",
+                                },
+                                {
+                                    "title": "Invoice records synced",
+                                    "value": "Not used",
+                                    "help_text": f"Mock API invoice sync count: {details.get('invoice_count', 0)}",
+                                },
+                                {
+                                    "title": "Total sync time",
+                                    "value": f"{result.get('total_time_sec', 'N/A')} sec",
+                                    "help_text": "Structured sync runtime",
+                                },
+                            ],
+                            columns=4,
+                        )
+                    else:
+                        st.error(
+                            f"Sync failed: {result.get('error', result.get('message', 'Unknown error'))}"
+                        )
+                    render_technical_details("Technical sync details", result)
+                except Exception as exc:
+                    st.error("Structured sync failed. Check the Mock SAP API and database connection.")
+                    render_technical_details(
+                        "Technical sync details",
+                        {"error": str(exc), "error_type": type(exc).__name__},
+                    )
+
+    with tab_po:
         try:
-            st.subheader("Create Manual Invoice")
+            st.subheader("Create Mock Purchase Order")
+            st.info("This creates PO data in Mock SAP API. Run Structured Sync afterward to copy it into the AP master reference table.")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                po_number = st.text_input("PO Number", key="po_number_input")
+                po_vendor_name = st.text_input("Vendor Name", key="po_vendor_name_input")
+                po_date = st.date_input("PO Date", key="po_date_input")
+            with col2:
+                po_currency = st.selectbox("Currency", options=["INR", "USD", "EUR", "GBP"], index=0, key="po_currency_input")
+                vat_percent = st.number_input("VAT %", min_value=0.0, max_value=100.0, value=18.0, key="po_vat_percent_input")
+                po_status = st.selectbox("PO Status", options=["Open", "Closed", "Cancelled", "Partially Received"], key="po_status_input")
+
+            po_subtotal, po_line_items = render_line_items_editor(
+                state_key="po_line_items",
+                prefix="po",
+                title="PO Line Items",
+                qty_label="Quantity",
+                qty_min=1,
+            )
+
+            st.subheader("PO Totals")
+            tax_amount = po_subtotal * (vat_percent / 100)
+            po_document_total = po_subtotal + tax_amount
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Subtotal", f"{po_subtotal:.2f} {po_currency}")
+            with col2:
+                st.metric("Tax Amount", f"{tax_amount:.2f} {po_currency}")
+            with col3:
+                st.metric("Total", f"{po_document_total:.2f} {po_currency}")
+
+            if st.button("Create Purchase Order", key="create_po_button"):
+                try:
+                    validation_errors = []
+                    if not po_number.strip():
+                        validation_errors.append("PO Number is required.")
+                    if not po_vendor_name.strip():
+                        validation_errors.append("Vendor Name is required.")
+                    valid_lines = [
+                        item for item in po_line_items
+                        if str(item.get("description", "")).strip()
+                        and float(item.get("line_amount", 0) or 0) > 0
+                    ]
+                    if not valid_lines:
+                        validation_errors.append("Add at least one PO line item with a description and positive amount.")
+                    if validation_errors:
+                        for message in validation_errors:
+                            st.warning(message)
+                    else:
+                        payload = {
+                            "document_type": "po",
+                            "po_number": po_number,
+                            "vendor_name": po_vendor_name,
+                            "po_date": str(po_date),
+                            "currency": po_currency,
+                            "document_subtotal": po_subtotal,
+                            "tax_amount": tax_amount,
+                            "vat_percent": vat_percent,
+                            "document_total": po_document_total,
+                            "amount": po_document_total,
+                            "po_status": po_status,
+                            "line_items": po_line_items,
+                            "last_modified": datetime.now().isoformat(),
+                        }
+
+                        response = requests.post(
+                            f"{API_BASE_URL}/sap/po",
+                            json=payload,
+                            auth=(SAP_USERNAME, SAP_PASSWORD),
+                            timeout=60,
+                        )
+
+                        try:
+                            response_payload = response.json()
+                        except ValueError:
+                            response_payload = {"raw_response": response.text}
+
+                        if response.status_code == 200:
+                            st.success("PO created in Mock SAP API. Now run Structured Sync to copy it into the AP master reference table.")
+                        else:
+                            st.error(f"Error creating PO: {response.text}")
+                        render_technical_details("Technical PO API response", response_payload)
+                except Exception as exc:
+                    st.error("PO creation failed. Check that Mock SAP API is running.")
+                    render_technical_details(
+                        "Technical PO API response",
+                        {"error": str(exc), "error_type": type(exc).__name__},
+                    )
+        except Exception as po_exception:
+            st.error(f"Error in PO creation form: {po_exception}")
+
+    with tab_grn:
+        try:
+            st.subheader("Create Mock GRN")
+            st.info("This creates GRN data in Mock SAP API. Run Structured Sync afterward to copy it into the AP master reference table.")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                gr_number = st.text_input("GRN Number", key="grn_number_input")
+                po_number = st.text_input("Related PO Number", key="grn_po_number_input")
+                vendor_name = st.text_input("Vendor Name", key="grn_vendor_name_input")
+            with col2:
+                gr_date = st.date_input("GRN Date", key="grn_date_input")
+                currency = st.selectbox("Currency", options=["INR", "USD", "EUR", "GBP"], index=0, key="grn_currency_input")
+                gr_status = st.selectbox(
+                    "GRN Status",
+                    options=["Received", "Partially Received", "Pending"],
+                    key="grn_status_input",
+                )
+
+            grn_subtotal, grn_line_items = render_line_items_editor(
+                state_key="grn_line_items",
+                prefix="grn",
+                title="GRN Line Items",
+                qty_label="Received Quantity",
+                qty_min=0,
+            )
+
+            st.subheader("GRN Total")
+            grn_document_total = grn_subtotal
+
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Document Subtotal", f"{grn_subtotal:.2f} {currency}")
+            with col2:
+                st.metric("Total Amount", f"{grn_document_total:.2f} {currency}")
+
+            if st.button("Create GRN", key="create_grn_button"):
+                try:
+                    validation_errors = []
+                    if not gr_number.strip():
+                        validation_errors.append("GRN Number is required.")
+                    if not po_number.strip():
+                        validation_errors.append("Related PO Number is required.")
+                    if not vendor_name.strip():
+                        validation_errors.append("Vendor Name is required.")
+                    valid_lines = [
+                        item for item in grn_line_items
+                        if float(item.get("qty", 0) or 0) > 0
+                        or float(item.get("line_amount", 0) or 0) > 0
+                    ]
+                    if not valid_lines:
+                        validation_errors.append("Add at least one GRN line item with positive received quantity or amount.")
+                    if validation_errors:
+                        for message in validation_errors:
+                            st.warning(message)
+                    else:
+                        payload = {
+                            "document_type": "grn",
+                            "gr_number": gr_number,
+                            "po_number": po_number,
+                            "vendor_name": vendor_name,
+                            "gr_date": str(gr_date),
+                            "currency": currency,
+                            "document_subtotal": grn_subtotal,
+                            "document_total": grn_document_total,
+                            "amount": grn_document_total,
+                            "gr_status": gr_status,
+                            "line_items": grn_line_items,
+                            "last_modified": datetime.now().isoformat(),
+                        }
+
+                        response = requests.post(
+                            f"{API_BASE_URL}/sap/gr",
+                            json=payload,
+                            auth=(SAP_USERNAME, SAP_PASSWORD),
+                            timeout=60,
+                        )
+
+                        try:
+                            response_payload = response.json()
+                        except ValueError:
+                            response_payload = {"raw_response": response.text}
+
+                        if response.status_code == 200:
+                            st.success("GRN created in Mock SAP API. Now run Structured Sync to copy it into the AP master reference table.")
+                        else:
+                            st.error(f"Error creating GRN: {response.text}")
+                        render_technical_details("Technical GRN API response", response_payload)
+                except Exception as exc:
+                    st.error("GRN creation failed. Check that Mock SAP API is running.")
+                    render_technical_details(
+                        "Technical GRN API response",
+                        {"error": str(exc), "error_type": type(exc).__name__},
+                    )
+        except Exception as grn_exception:
+            st.error(f"Error in GRN creation form: {grn_exception}")
+
+    with tab_invoice:
+        try:
+            st.subheader("Manual Invoice Entry")
+            st.warning(
+                "Manual invoice entry bypasses PDF/OCR extraction. Use this only for internal validation testing. For a client demo, use Invoice Journey."
+            )
 
             col1, col2 = st.columns(2)
             with col1:
@@ -2806,206 +3116,91 @@ def render_reference_data_test_setup():
 
             if st.button("Create Invoice", key="create_invoice_button"):
                 try:
-                    payload = {
-                        "document_type": "invoice",
-                        "invoice_number": invoice_number,
-                        "po_number": po_number,
-                        "vendor_name": vendor_name,
-                        "invoice_date": str(invoice_date),
-                        "currency": currency,
-                        "document_subtotal": invoice_subtotal,
-                        "tax_amount": tax_amount,
-                        "vat_percent": vat_percent,
-                        "document_total": document_total,
-                        "amount": document_total,
-                        "payment_status": payment_status,
-                        "line_items": invoice_line_items,
-                        "last_modified": datetime.now().isoformat(),
-                    }
-
-                    if not invoice_number:
-                        st.error("Invoice Number is required.")
-                        st.stop()
-
-                    if not po_number:
-                        st.error("Related PO Number is required.")
-                        st.stop()
-
-                    if not vendor_name:
-                        st.error("Vendor Name is required.")
-                        st.stop()
-
-                    result = save_manual_invoice_to_master(
-                        payload
-                    )
-
-                    st.success(
-                        "Manual invoice saved to invoice_master."
-                    )
-
-                    render_technical_details("Invoice save details", result)
-
-                    if result.get("ap_agent_trigger_error"):
-                        st.warning(
-                            "Invoice was saved, but AP Agent trigger failed. "
-                            "Make sure AP Agent is running on port 8000, then trigger processing."
-                        )
-                        st.code(
-                            result.get("ap_agent_trigger_error"),
-                            language="text",
-                        )
+                    validation_errors = []
+                    if not invoice_number.strip():
+                        validation_errors.append("Invoice Number is required.")
+                    if not po_number.strip():
+                        validation_errors.append("Related PO Number is required.")
+                    if not vendor_name.strip():
+                        validation_errors.append("Vendor Name is required.")
+                    valid_lines = [
+                        item for item in invoice_line_items
+                        if str(item.get("description", "")).strip()
+                        and float(item.get("line_amount", 0) or 0) > 0
+                    ]
+                    if not valid_lines:
+                        validation_errors.append("Add at least one invoice line item with a description and positive amount.")
+                    if validation_errors:
+                        for message in validation_errors:
+                            st.warning(message)
                     else:
-                        st.success(
-                            "AP Agent trigger completed."
-                        )
-                except Exception as e:
-                    st.exception(e)
+                        payload = {
+                            "document_type": "invoice",
+                            "invoice_number": invoice_number,
+                            "po_number": po_number,
+                            "vendor_name": vendor_name,
+                            "invoice_date": str(invoice_date),
+                            "currency": currency,
+                            "document_subtotal": invoice_subtotal,
+                            "tax_amount": tax_amount,
+                            "vat_percent": vat_percent,
+                            "document_total": document_total,
+                            "amount": document_total,
+                            "payment_status": payment_status,
+                            "line_items": invoice_line_items,
+                            "last_modified": datetime.now().isoformat(),
+                        }
+
+                        result = save_manual_invoice_to_master(payload)
+                        st.success("Manual invoice saved to invoice_master.")
+                        render_technical_details("Technical invoice save details", result)
+
+                        if result.get("ap_agent_trigger_error"):
+                            st.warning(
+                                "Invoice was saved, but AP Agent trigger failed. Make sure AP Agent is running on port 8000, then trigger processing."
+                            )
+                            st.code(result.get("ap_agent_trigger_error"), language="text")
+                        else:
+                            st.success("AP Agent trigger completed.")
+                except Exception as exc:
+                    st.error("Manual invoice save failed.")
+                    render_technical_details(
+                        "Technical invoice save details",
+                        {"error": str(exc), "error_type": type(exc).__name__},
+                    )
         except Exception as invoice_exception:
-            st.error(f"Error in Invoice creation form: {invoice_exception}")
+            st.error(f"Error in manual invoice form: {invoice_exception}")
 
-    # ===================================
-    # CREATE PO
-    # ===================================
-    with tab2:
-        try:
-            st.subheader("Create Mock Purchase Order")
-
-            col1, col2 = st.columns(2)
-            with col1:
-                po_number = st.text_input("PO Number", key="po_number_input")
-                po_vendor_name = st.text_input("Vendor Name", key="po_vendor_name_input")
-                po_date = st.date_input("PO Date", key="po_date_input")
-            with col2:
-                po_currency = st.selectbox("Currency", options=["INR", "USD", "EUR", "GBP"], index=0, key="po_currency_input")
-                vat_percent = st.number_input("VAT %", min_value=0.0, max_value=100.0, value=18.0, key="po_vat_percent_input")
-                po_status = st.selectbox("PO Status", options=["Open", "Closed", "Cancelled", "Partially Received"], key="po_status_input")
-
-            po_subtotal, po_line_items = render_line_items_editor(
-                state_key="po_line_items",
-                prefix="po",
-                title="PO Line Items",
-                qty_label="Quantity",
-                qty_min=1,
+    with tab_tables:
+        st.subheader("Reference Tables")
+        table_tabs = st.tabs(
+            [
+                "Master Invoices",
+                "Master POs",
+                "Master GRNs",
+                "Posted Invoice References",
+            ]
+        )
+        with table_tabs[0]:
+            safe_dataframe(
+                safe_load_table("invoice_master", limit=20),
+                "No master invoices found.",
             )
-
-            st.subheader("PO Totals")
-            tax_amount = po_subtotal * (vat_percent / 100)
-            po_document_total = po_subtotal + tax_amount
-
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Subtotal", f"{po_subtotal:.2f} {po_currency}")
-            with col2:
-                st.metric("Tax Amount", f"{tax_amount:.2f} {po_currency}")
-            with col3:
-                st.metric("Total", f"{po_document_total:.2f} {po_currency}")
-
-            if st.button("Create Purchase Order", key="create_po_button"):
-                try:
-                    payload = {
-                        "document_type": "po",
-                        "po_number": po_number,
-                        "vendor_name": po_vendor_name,
-                        "po_date": str(po_date),
-                        "currency": po_currency,
-                        "document_subtotal": po_subtotal,
-                        "tax_amount": tax_amount,
-                        "vat_percent": vat_percent,
-                        "document_total": po_document_total,
-                        "amount": po_document_total,
-                        "po_status": po_status,
-                        "line_items": po_line_items,
-                        "last_modified": datetime.now().isoformat(),
-                    }
-
-                    response = requests.post(
-                        f"{API_BASE_URL}/sap/po",
-                        json=payload,
-                        auth=(SAP_USERNAME, SAP_PASSWORD),
-                        timeout=60,
-                    )
-
-                    if response.status_code == 200:
-                        st.success("Purchase Order created successfully.")
-                        render_technical_details("PO API response", response.json())
-                    else:
-                        st.error(f"Error creating PO: {response.text}")
-                except Exception as e:
-                    st.exception(e)
-        except Exception as po_exception:
-            st.error(f"Error in PO creation form: {po_exception}")
-
-    # ===================================
-    # CREATE GRN
-    # ===================================
-    with tab3:
-        try:
-            st.subheader("Create Mock GRN")
-
-            col1, col2 = st.columns(2)
-            with col1:
-                gr_number = st.text_input("GRN Number", key="grn_number_input")
-                po_number = st.text_input("Related PO Number", key="grn_po_number_input")
-                vendor_name = st.text_input("Vendor Name", key="grn_vendor_name_input")
-            with col2:
-                gr_date = st.date_input("GRN Date", key="grn_date_input")
-                currency = st.selectbox("Currency", options=["INR", "USD", "EUR", "GBP"], index=0, key="grn_currency_input")
-                gr_status = st.selectbox(
-                    "GRN Status",
-                    options=["Received", "Partially Received", "Pending"],
-                    key="grn_status_input",
-                )
-
-            grn_subtotal, grn_line_items = render_line_items_editor(
-                state_key="grn_line_items",
-                prefix="grn",
-                title="GRN Line Items",
-                qty_label="Received Quantity",
-                qty_min=0,
+        with table_tabs[1]:
+            safe_dataframe(
+                safe_load_table("sap_po_master", limit=20),
+                "No master PO records found.",
             )
-
-            st.subheader("GRN Total")
-            grn_document_total = grn_subtotal
-
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Document Subtotal", f"{grn_subtotal:.2f} {currency}")
-            with col2:
-                st.metric("Total Amount", f"{grn_document_total:.2f} {currency}")
-
-            if st.button("Create GRN", key="create_grn_button"):
-                try:
-                    payload = {
-                        "document_type": "grn",
-                        "gr_number": gr_number,
-                        "po_number": po_number,
-                        "vendor_name": vendor_name,
-                        "gr_date": str(gr_date),
-                        "currency": currency,
-                        "document_subtotal": grn_subtotal,
-                        "document_total": grn_document_total,
-                        "amount": grn_document_total,
-                        "gr_status": gr_status,
-                        "line_items": grn_line_items,
-                        "last_modified": datetime.now().isoformat(),
-                    }
-
-                    response = requests.post(
-                        f"{API_BASE_URL}/sap/gr",
-                        json=payload,
-                        auth=(SAP_USERNAME, SAP_PASSWORD),
-                        timeout=60,
-                    )
-
-                    if response.status_code == 200:
-                        st.success("GRN created successfully.")
-                        render_technical_details("GRN API response", response.json())
-                    else:
-                        st.error(f"Error creating GRN: {response.text}")
-                except Exception as e:
-                    st.exception(e)
-        except Exception as grn_exception:
-            st.error(f"Error in GRN creation form: {grn_exception}")
+        with table_tabs[2]:
+            safe_dataframe(
+                safe_load_table("sap_grn_master", limit=20),
+                "No master GRN records found.",
+            )
+        with table_tabs[3]:
+            safe_dataframe(
+                safe_load_table("sap_posted_invoice_master", limit=20),
+                "No posted invoice references found.",
+            )
 
     # -----------------------------------
     # ADMIN DATA MANAGER
