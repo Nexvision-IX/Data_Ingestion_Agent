@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
+import traceback
 from pathlib import Path
 
 import requests
@@ -30,6 +32,7 @@ from app.schemas import CommunicationRequest, RecheckRequest
 from app.services.serializers import (
     exception_payload,
     invoice_payload,
+    make_json_safe,
 )
 from app.services.duplicate_invoice_control import DuplicateInvoiceControl
 from app.services.invoice_financial_control import InvoiceFinancialControl
@@ -65,6 +68,8 @@ from ingestion.master_ingestion import (
     upsert_posted_invoice,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class APOrchestrator:
     def __init__(self, db: Session):
@@ -93,132 +98,210 @@ class APOrchestrator:
                 event_type=event_type,
                 agent_name=agent,
                 message=message,
-                metadata_json=metadata or {},
+                metadata_json=make_json_safe(metadata or {}),
             )
         )
 
     def process(self, invoice: Invoice) -> Invoice:
-        self._event(
-            invoice,
-            "SAP_FETCH_STARTED",
-            "SAPDataAgent",
-            "Fetching source data.",
-        )
-        self.db.commit()
+        try:
+            self._event(
+                invoice,
+                "SAP_FETCH_STARTED",
+                "SAPDataAgent",
+                "Fetching source data.",
+            )
+            self.db.commit()
 
-        context = self.sap.get_invoice_context(invoice)
-        self._event(
-            invoice,
-            "SAP_DATA_FETCHED",
-            "SAPDataAgent",
-            (
-                "PO, vendor, GRN, and invoice-history data "
-                "were fetched."
-            ),
-            {"source": context.get("source")},
-        )
+            context = self.sap.get_invoice_context(invoice)
+            self._event(
+                invoice,
+                "SAP_DATA_FETCHED",
+                "SAPDataAgent",
+                (
+                    "PO, vendor, GRN, and invoice-history data "
+                    "were fetched."
+                ),
+                {"source": context.get("source")},
+            )
 
+            try:
+                transition_invoice_status(
+                    invoice,
+                    InvoiceWorkflowStatus.VALIDATION_IN_PROGRESS,
+                    "Deterministic AP validation started.",
+                    actor="APOrchestrator",
+                    allow_same=True,
+                )
+            except InvalidInvoiceStatusTransition:
+                # Legacy workflow-only statuses predate the CP-16 catalog.
+                if invoice.status not in {
+                    "SAP_DATA_PENDING",
+                    "VALIDATION_FAILED",
+                    "FAILED",
+                    "RECHECK_PENDING",
+                    "WAITING_FOR_RESPONSE",
+                    "ESCALATED",
+                }:
+                    raise
+                set_invoice_status_without_transition(
+                    invoice,
+                    InvoiceWorkflowStatus.VALIDATION_IN_PROGRESS,
+                    "Legacy invoice status normalized before validation.",
+                    actor="APOrchestrator",
+                    metadata={"legacy_status_repair": True},
+                )
+            self.db.execute(
+                delete(ValidationResult).where(
+                    ValidationResult.invoice_id == invoice.id
+                )
+            )
+
+            results = self._run_validation_controls(invoice, context)
+
+            for result in results:
+                self.db.add(
+                    ValidationResult(
+                        invoice_id=invoice.id,
+                        rule_code=result.rule_code,
+                        rule_name=result.rule_name,
+                        passed=result.passed,
+                        severity=result.severity,
+                        message=result.message,
+                        details=make_json_safe(result.details or {}),
+                    )
+                )
+
+            self._event(
+                invoice,
+                "VALIDATION_COMPLETED",
+                "ValidationAgent",
+                "Deterministic AP validation completed.",
+                {
+                    "passed": sum(
+                        1
+                        for result in results
+                        if result.passed
+                    ),
+                    "failed": sum(
+                        1
+                        for result in results
+                        if not result.passed
+                    ),
+                },
+            )
+            self.db.commit()
+            self.db.refresh(invoice)
+
+            if self.validator.is_clean(results):
+                transition_invoice_status(
+                    invoice,
+                    InvoiceWorkflowStatus.READY_FOR_POSTING,
+                    "Invoice passed all blocking deterministic controls.",
+                    actor="DecisionAgent",
+                )
+                self._event(
+                    invoice,
+                    "INVOICE_CLEAN",
+                    "DecisionAgent",
+                    (
+                        "Invoice passed all blocking deterministic "
+                        "controls."
+                    ),
+                )
+                POGRNConsumptionLedgerService(self.db).reserve(
+                    invoice,
+                    context,
+                )
+
+                if settings.auto_post_clean_invoices:
+                    self._post(invoice, context)
+
+            else:
+                POGRNConsumptionLedgerService(self.db).release(
+                    invoice,
+                    "Invoice entered exception workflow.",
+                )
+                self._handle_exception(invoice, results)
+
+            self.db.commit()
+            self.db.refresh(invoice)
+
+            return invoice
+
+        except Exception as exc:
+            self._record_processing_failure(invoice.id, exc)
+            raise
+
+    def _record_processing_failure(
+        self,
+        invoice_id: str,
+        exc: Exception,
+    ) -> None:
+        logger.exception(
+            "AP Agent processing failed for invoice_id=%s",
+            invoice_id,
+        )
+        self.db.rollback()
+        failed_invoice = self.db.get(Invoice, invoice_id)
+        if failed_invoice is None:
+            return
+
+        metadata = {
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+            "traceback": traceback.format_exc(),
+        }
         try:
             transition_invoice_status(
-                invoice,
-                InvoiceWorkflowStatus.VALIDATION_IN_PROGRESS,
-                "Deterministic AP validation started.",
+                failed_invoice,
+                InvoiceWorkflowStatus.EXCEPTION_IDENTIFIED,
+                "AP Agent processing failed after source-data fetch started.",
                 actor="APOrchestrator",
-                allow_same=True,
+                metadata=metadata,
             )
         except InvalidInvoiceStatusTransition:
-            # Legacy workflow-only statuses predate the CP-16 catalog.
-            if invoice.status not in {
-                "SAP_DATA_PENDING",
-                "VALIDATION_FAILED",
-                "FAILED",
-                "RECHECK_PENDING",
-                "WAITING_FOR_RESPONSE",
-                "ESCALATED",
-            }:
-                raise
             set_invoice_status_without_transition(
-                invoice,
-                InvoiceWorkflowStatus.VALIDATION_IN_PROGRESS,
-                "Legacy invoice status normalized before validation.",
+                failed_invoice,
+                InvoiceWorkflowStatus.EXCEPTION_IDENTIFIED,
+                "AP Agent processing failed after source-data fetch started.",
                 actor="APOrchestrator",
-                metadata={"legacy_status_repair": True},
+                metadata={**metadata, "legacy_status_repair": True},
             )
-        self.db.execute(
-            delete(ValidationResult).where(
-                ValidationResult.invoice_id == invoice.id
-            )
+
+        existing_open = next(
+            (
+                item
+                for item in reversed(failed_invoice.exceptions)
+                if item.status == "OPEN"
+            ),
+            None,
         )
-
-        results = self._run_validation_controls(invoice, context)
-
-        for result in results:
+        if existing_open is None:
             self.db.add(
-                ValidationResult(
-                    invoice_id=invoice.id,
-                    rule_code=result.rule_code,
-                    rule_name=result.rule_name,
-                    passed=result.passed,
-                    severity=result.severity,
-                    message=result.message,
-                    details=result.details,
+                ExceptionCase(
+                    invoice_id=failed_invoice.id,
+                    category="PROCESSING_FAILURE",
+                    classifier_confidence=1.0,
+                    classifier_rationale=str(exc),
+                    priority="HIGH",
+                    owner_team="AP Operations",
+                    status="OPEN",
+                    resolution_strategy=(
+                        "Review the AP Agent error details, fix the "
+                        "configuration or data issue, then reprocess the "
+                        "invoice."
+                    ),
                 )
             )
 
         self._event(
-            invoice,
-            "VALIDATION_COMPLETED",
-            "ValidationAgent",
-            "Deterministic AP validation completed.",
-            {
-                "passed": sum(
-                    1
-                    for result in results
-                    if result.passed
-                ),
-                "failed": sum(
-                    1
-                    for result in results
-                    if not result.passed
-                ),
-            },
+            failed_invoice,
+            "AP_PROCESSING_FAILED",
+            "APOrchestrator",
+            "AP Agent processing failed after source-data fetch started.",
+            metadata,
         )
-
-        if self.validator.is_clean(results):
-            transition_invoice_status(
-                invoice,
-                InvoiceWorkflowStatus.READY_FOR_POSTING,
-                "Invoice passed all blocking deterministic controls.",
-                actor="DecisionAgent",
-            )
-            self._event(
-                invoice,
-                "INVOICE_CLEAN",
-                "DecisionAgent",
-                (
-                    "Invoice passed all blocking deterministic "
-                    "controls."
-                ),
-            )
-            POGRNConsumptionLedgerService(self.db).reserve(
-                invoice,
-                context,
-            )
-
-            if settings.auto_post_clean_invoices:
-                self._post(invoice, context)
-
-        else:
-            POGRNConsumptionLedgerService(self.db).release(
-                invoice,
-                "Invoice entered exception workflow.",
-            )
-            self._handle_exception(invoice, results)
-
         self.db.commit()
-        self.db.refresh(invoice)
-
-        return invoice
 
     def _handle_exception(
         self,

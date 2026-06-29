@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import traceback
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -23,6 +24,7 @@ from app.models import (
 )
 from app.integrations.llm.mock import MockLLMClient
 from app.services.extraction_quality_service import ExtractionQualityService
+from app.services.serializers import make_json_safe
 from app.services.po_grn_consumption_ledger_service import (
     POGRNConsumptionLedgerService,
 )
@@ -145,15 +147,7 @@ def _load_json(value: Any, default):
 
 
 def _json_compatible(value: Any) -> Any:
-    if isinstance(value, (date, datetime)):
-        return value.isoformat()
-    if isinstance(value, Decimal):
-        return float(value)
-    if isinstance(value, dict):
-        return {key: _json_compatible(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_compatible(item) for item in value]
-    return value
+    return make_json_safe(value)
 
 
 class APMasterTriggerService:
@@ -228,10 +222,27 @@ class APMasterTriggerService:
 
             except Exception as exc:
                 self.db.rollback()
+                failed_invoice = self.db.scalar(
+                    select(Invoice)
+                    .where(
+                        Invoice.invoice_number == invoice_number,
+                        Invoice.source == "AP_MASTER_IMPORT",
+                    )
+                    .order_by(Invoice.created_at.desc())
+                    .limit(1)
+                )
                 failed.append(
                     {
                         "invoice_number": invoice_number,
+                        "agent_invoice_id": (
+                            failed_invoice.id if failed_invoice else None
+                        ),
+                        "status": (
+                            failed_invoice.status if failed_invoice else None
+                        ),
+                        "error_type": type(exc).__name__,
                         "error": str(exc),
+                        "traceback": traceback.format_exc(),
                     }
                 )
 
