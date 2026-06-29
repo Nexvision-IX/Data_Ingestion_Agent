@@ -6,9 +6,13 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, JSON, Numeric, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
+
+
+JSON_DOCUMENT = JSON().with_variant(JSONB(), "postgresql")
 
 
 def _id() -> str:
@@ -48,7 +52,7 @@ class Invoice(Base):
         String(100), nullable=True
     )
     extraction_confidence: Mapped[float] = mapped_column(Float, default=0)
-    extraction_raw: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    extraction_raw: Mapped[dict[str, Any]] = mapped_column(JSON_DOCUMENT, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
 
@@ -86,7 +90,7 @@ class ValidationResult(Base):
     passed: Mapped[bool] = mapped_column(Boolean)
     severity: Mapped[str] = mapped_column(String(20), default="ERROR")
     message: Mapped[str] = mapped_column(Text)
-    details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    details: Mapped[dict[str, Any]] = mapped_column(JSON_DOCUMENT, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
     invoice: Mapped["Invoice"] = relationship(back_populates="validations")
@@ -139,7 +143,7 @@ class WorkflowEvent(Base):
     event_type: Mapped[str] = mapped_column(String(60), index=True)
     agent_name: Mapped[str] = mapped_column(String(100))
     message: Mapped[str] = mapped_column(Text)
-    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON_DOCUMENT, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
     invoice: Mapped["Invoice"] = relationship(back_populates="events")

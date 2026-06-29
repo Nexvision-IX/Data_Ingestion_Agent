@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import sys
+from pathlib import Path
 from typing import Any, Callable
 
 from sqlalchemy import select
@@ -13,6 +15,13 @@ from app.models import (
     WorkflowEvent,
 )
 from app.services.status_catalog_service import InvoiceWorkflowStatus
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
+
+from ap_database.master_repository import update_payment_terms  # noqa: E402
 
 
 SAFE_RECHECK_STATUSES = frozenset(
@@ -33,7 +42,18 @@ RESPONSE_SOURCES = frozenset(
 
 _PO_PREFIXED = re.compile(r"\bPO(?:[-\s]?)(\d{5,})\b", re.IGNORECASE)
 _PO_CONTEXT_NUMBER = re.compile(r"\b(\d{8,})\b")
-_PAYMENT_TERMS = re.compile(r"\bNET[\s-]?(30|45|60)\b", re.IGNORECASE)
+_PAYMENT_TERMS_PATTERNS = (
+    re.compile(r"\bNET[\s-]?(\d{1,3})(?:\s*DAYS?)?\b", re.IGNORECASE),
+    re.compile(r"\bDUE\s+IN\s+(\d{1,3})\s+DAYS?\b", re.IGNORECASE),
+)
+_DUE_ON_RECEIPT = re.compile(
+    r"\b(DUE\s+ON\s+RECEIPT|IMMEDIATE|PAYABLE\s+ON\s+RECEIPT)\b",
+    re.IGNORECASE,
+)
+PAYMENT_TERMS_MISSING_MESSAGE = (
+    "Recheck skipped because no approved payment term such as NET 30 was "
+    "found in the response, and no master data was updated."
+)
 
 
 class ExceptionResponseIntakeError(ValueError):
@@ -141,12 +161,21 @@ class ExceptionResponseIntakeService:
             evidence=evidence,
             source=source,
             provided_by=provided_by,
+            response_text=response_text,
         )
 
         resume_requested = bool(data.get("resume_recheck", False))
         resumed = False
         recheck_reason = ""
-        if resume_requested and invoice.status in SAFE_RECHECK_STATUSES:
+        payment_terms_recheck_without_terms = (
+            exception.category == "PAYMENT_TERMS_MISMATCH"
+            and "PAYMENT_TERMS_PROVIDED" not in evidence
+        )
+        if (
+            resume_requested
+            and invoice.status in SAFE_RECHECK_STATUSES
+            and not payment_terms_recheck_without_terms
+        ):
             self._event(
                 invoice,
                 "EXCEPTION_RECHECK_REQUESTED_FROM_RESPONSE",
@@ -170,6 +199,17 @@ class ExceptionResponseIntakeService:
         else:
             if not resume_requested:
                 recheck_reason = "resume_recheck was false."
+            elif payment_terms_recheck_without_terms:
+                recheck_reason = PAYMENT_TERMS_MISSING_MESSAGE
+                self._event(
+                    invoice,
+                    "PAYMENT_TERMS_RECHECK_EVIDENCE_MISSING",
+                    PAYMENT_TERMS_MISSING_MESSAGE,
+                    {
+                        "exception_id": exception.id,
+                        "invoice_status": invoice.status,
+                    },
+                )
             else:
                 recheck_reason = (
                     f"Invoice status '{invoice.status}' is not safe for "
@@ -284,6 +324,7 @@ class ExceptionResponseIntakeService:
         evidence: dict[str, dict[str, Any]],
         source: str,
         provided_by: str | None,
+        response_text: str,
     ) -> dict[str, dict[str, Any]]:
         if invoice.status in TERMINAL_INVOICE_STATUSES:
             return {}
@@ -310,6 +351,17 @@ class ExceptionResponseIntakeService:
                     "old_value": old_value,
                     "new_value": new_value,
                 }
+            if exception.category == "PAYMENT_TERMS_MISMATCH":
+                master_update = self._apply_payment_terms_master_update(
+                    invoice,
+                    exception=exception,
+                    payment_terms=new_value,
+                    response_text=response_text,
+                    source=source,
+                    provided_by=provided_by,
+                )
+                if master_update:
+                    updates["master_payment_terms"] = master_update
 
         for field, values in updates.items():
             self._event(
@@ -328,8 +380,85 @@ class ExceptionResponseIntakeService:
 
     @staticmethod
     def _terms(value: str) -> str | None:
-        match = _PAYMENT_TERMS.search(value)
-        return f"NET{match.group(1)}" if match else None
+        for pattern in _PAYMENT_TERMS_PATTERNS:
+            match = pattern.search(value)
+            if match:
+                return f"NET {int(match.group(1))}"
+        if _DUE_ON_RECEIPT.search(value):
+            return "DUE_ON_RECEIPT"
+        return None
+
+    def _apply_payment_terms_master_update(
+        self,
+        invoice: Invoice,
+        *,
+        exception: ExceptionCase,
+        payment_terms: str,
+        response_text: str,
+        source: str,
+        provided_by: str | None,
+    ) -> dict[str, Any] | None:
+        target = self._payment_terms_update_target(response_text)
+        if target == "invoice":
+            table_name = "invoice_master"
+            primary_key_value = invoice.invoice_number
+        else:
+            table_name = "sap_po_master"
+            primary_key_value = invoice.po_number
+
+        if not primary_key_value:
+            self._event(
+                invoice,
+                "PAYMENT_TERMS_MASTER_UPDATE_SKIPPED",
+                "Payment terms evidence was found but the target master key is missing.",
+                {
+                    "exception_id": exception.id,
+                    "target": target,
+                    "payment_terms": payment_terms,
+                    "source": source,
+                    "provided_by": provided_by,
+                },
+            )
+            return None
+
+        result = update_payment_terms(
+            table_name,
+            str(primary_key_value),
+            payment_terms,
+        )
+        result.update(
+            {
+                "exception_id": exception.id,
+                "target": target,
+                "source": source,
+                "provided_by": provided_by,
+                "auditable_resolution_action": True,
+            }
+        )
+        self._event(
+            invoice,
+            "PAYMENT_TERMS_MASTER_UPDATED_FROM_RESPONSE",
+            (
+                f"Payment terms were applied to {table_name} before "
+                "controlled recheck."
+            ),
+            result,
+        )
+        return result
+
+    @staticmethod
+    def _payment_terms_update_target(response_text: str) -> str:
+        lowered = response_text.lower()
+        invoice_markers = (
+            "invoice terms corrected",
+            "correct invoice",
+            "invoice payment terms corrected",
+            "update invoice",
+            "invoice master",
+        )
+        if any(marker in lowered for marker in invoice_markers):
+            return "invoice"
+        return "po_master"
 
     def _orchestrator(self):
         if self.orchestrator_factory is not None:

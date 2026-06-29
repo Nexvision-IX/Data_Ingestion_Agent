@@ -7,7 +7,7 @@ import traceback
 from pathlib import Path
 
 import requests
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.agents.classification_agent import ClassificationAgent
@@ -67,6 +67,7 @@ from ingestion.master_ingestion import (
     init_db as init_master_db,
     upsert_posted_invoice,
 )
+from ap_database.master_repository import update_payment_terms
 
 logger = logging.getLogger(__name__)
 
@@ -569,10 +570,19 @@ class APOrchestrator:
                 "MOCK_RESOLUTION_APPLIED",
                 "MockSAPGateway",
                 (
-                    "Demo source data updated for "
+                "Demo source data updated for "
                     f"{exception.category}."
                 ),
             )
+
+        response_evidence = self._latest_response_evidence(invoice, exception)
+        master_update = self._apply_payment_terms_evidence_for_recheck(
+            invoice,
+            exception,
+            response_evidence,
+        )
+        if master_update:
+            self.db.commit()
 
         context = self.sap.get_invoice_context(invoice)
 
@@ -585,7 +595,11 @@ class APOrchestrator:
             {
                 "invoice": invoice_payload(invoice),
                 "exception": exception_payload(exception),
-                "latest_message": request.latest_message or "",
+                "latest_message": self._recheck_message(
+                    request.latest_message,
+                    response_evidence,
+                    master_update,
+                ),
                 "recheck_count": exception.recheck_count,
                 "max_attempts": settings.recheck_max_attempts,
                 "recheck_eligibility": eligibility,
@@ -594,6 +608,8 @@ class APOrchestrator:
                     result.to_dict()
                     for result in current_results
                 ],
+                "stored_response_evidence": response_evidence,
+                "master_update": master_update,
             }
         )
 
@@ -686,8 +702,8 @@ class APOrchestrator:
             PO_GRNConsumptionControl(self.db).evaluate(
                 invoice,
                 context,
+                )
             )
-        )
         results.extend(
             DateSequenceControl().evaluate(invoice, context)
         )
@@ -698,6 +714,119 @@ class APOrchestrator:
             PaymentTermsControl().evaluate(invoice, context)
         )
         return results
+
+    def _latest_response_evidence(
+        self,
+        invoice: Invoice,
+        exception: ExceptionCase,
+    ) -> dict:
+        events = self.db.scalars(
+            select(WorkflowEvent)
+            .where(
+                WorkflowEvent.invoice_id == invoice.id,
+                WorkflowEvent.event_type.in_(
+                    [
+                        "EXCEPTION_EVIDENCE_EXTRACTED",
+                        "PAYMENT_TERMS_MASTER_UPDATED_FROM_RESPONSE",
+                    ]
+                ),
+            )
+            .order_by(WorkflowEvent.created_at.desc(), WorkflowEvent.id.desc())
+        ).all()
+
+        evidence: dict = {}
+        master_updates = []
+        for event in events:
+            metadata = event.metadata_json or {}
+            if metadata.get("exception_id") not in (None, exception.id):
+                continue
+            if event.event_type == "EXCEPTION_EVIDENCE_EXTRACTED":
+                event_evidence = metadata.get("evidence") or {}
+                if isinstance(event_evidence, dict):
+                    evidence.update(event_evidence)
+            elif event.event_type == "PAYMENT_TERMS_MASTER_UPDATED_FROM_RESPONSE":
+                master_updates.append(metadata)
+
+        if master_updates:
+            evidence["PAYMENT_TERMS_MASTER_UPDATES"] = master_updates
+        return evidence
+
+    def _apply_payment_terms_evidence_for_recheck(
+        self,
+        invoice: Invoice,
+        exception: ExceptionCase,
+        evidence: dict,
+    ) -> dict | None:
+        if exception.category != "PAYMENT_TERMS_MISMATCH":
+            return None
+
+        terms_evidence = evidence.get("PAYMENT_TERMS_PROVIDED") or {}
+        payment_terms = terms_evidence.get("payment_terms")
+        if not payment_terms:
+            self._event(
+                invoice,
+                "PAYMENT_TERMS_RECHECK_EVIDENCE_MISSING",
+                "RecheckAgent",
+                (
+                    "Recheck skipped because no approved payment term such "
+                    "as NET 30 was found in the response, and no master data "
+                    "was updated."
+                ),
+                {"exception_id": exception.id},
+            )
+            return None
+
+        existing_updates = evidence.get("PAYMENT_TERMS_MASTER_UPDATES") or []
+        if existing_updates:
+            return {
+                "already_updated": True,
+                "payment_terms": payment_terms,
+                "updates": existing_updates,
+            }
+
+        if not invoice.po_number:
+            return None
+
+        result = update_payment_terms(
+            "sap_po_master",
+            invoice.po_number,
+            payment_terms,
+        )
+        result.update(
+            {
+                "exception_id": exception.id,
+                "target": "po_master",
+                "auditable_resolution_action": True,
+                "source": "manual_controlled_recheck",
+            }
+        )
+        self._event(
+            invoice,
+            "PAYMENT_TERMS_MASTER_UPDATED_FROM_RECHECK",
+            (
+                "Stored payment terms response evidence was applied to "
+                "sap_po_master before controlled recheck."
+            ),
+            result,
+        )
+        return result
+
+    @staticmethod
+    def _recheck_message(
+        latest_message: str | None,
+        evidence: dict,
+        master_update: dict | None,
+    ) -> str:
+        parts = [latest_message or ""]
+        terms = (
+            evidence.get("PAYMENT_TERMS_PROVIDED", {})
+            .get("payment_terms")
+        )
+        if terms:
+            parts.append(f"Approved payment terms evidence: {terms}.")
+        if master_update:
+            parts.append("Payment terms master data updated.")
+        return " ".join(part for part in parts if part).strip()
 
     def _posted_invoice_payload(
         self,

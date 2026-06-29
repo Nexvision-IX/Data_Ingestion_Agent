@@ -138,13 +138,16 @@ class InvoiceRequest(BaseModel):
     invoice_number: str
     po_number: str
     vendor_name: str
+    vendor_number: Optional[str] = None
     invoice_date: str
+    due_date: Optional[str] = None
     currency: str
     document_subtotal: float
     tax_amount: float
     vat_percent: float
     document_total: float
     amount: Optional[float] = None
+    payment_terms: Optional[str] = None
     payment_status: str
     line_items: List[LineItem] = Field(default_factory=list)
     last_modified: Optional[str] = None
@@ -154,7 +157,9 @@ class PostedInvoiceRequest(BaseModel):
     invoice_number: str
     po_number: str
     vendor_name: str
+    vendor_number: Optional[str] = None
     invoice_date: str
+    due_date: Optional[str] = None
     currency: str
 
     document_subtotal: float
@@ -164,6 +169,7 @@ class PostedInvoiceRequest(BaseModel):
     amount: Optional[float] = None
 
     payment_status: str = "Posted"
+    payment_terms: Optional[str] = None
     posting_status: str = "POSTED"
     sap_document_number: Optional[str] = None
     posting_message: Optional[str] = None
@@ -179,6 +185,7 @@ class PORequest(BaseModel):
     document_type: str = "po"
     po_number: str
     vendor_name: str
+    vendor_number: Optional[str] = None
     po_date: str
     currency: str
     document_subtotal: float
@@ -186,6 +193,7 @@ class PORequest(BaseModel):
     vat_percent: float
     document_total: float
     amount: Optional[float] = None
+    payment_terms: Optional[str] = None
     po_status: str
     line_items: List[LineItem] = Field(default_factory=list)
     last_modified: Optional[str] = None
@@ -197,6 +205,7 @@ class GRNRequest(BaseModel):
     grn_number: Optional[str] = None
     po_number: str
     vendor_name: str
+    vendor_number: Optional[str] = None
     gr_date: str
     currency: str
     document_subtotal: float

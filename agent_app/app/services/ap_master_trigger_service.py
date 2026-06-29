@@ -42,6 +42,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from ap_database.engines import get_master_engine
 from ap_database.master_models import InvoiceMaster, SapPostedInvoiceMaster
+from ap_database.master_repository import init_master_schema_if_needed
 
 
 SAFE_REPROCESS_STATUSES = frozenset(
@@ -150,6 +151,78 @@ def _json_compatible(value: Any) -> Any:
     return make_json_safe(value)
 
 
+def _first_non_empty(*values: Any) -> Any:
+    for value in values:
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _normalize_payment_terms(value: Any) -> str | None:
+    raw = str(value or "").strip().upper()
+    if not raw:
+        return None
+    compact = re.sub(r"[^A-Z0-9]+", "", raw)
+    if compact in {"NET30", "N30", "NET30DAYS", "NET30DAY"}:
+        return "NET 30"
+    if compact in {"NET45", "N45", "NET45DAYS", "NET45DAY"}:
+        return "NET 45"
+    if compact in {"NET60", "N60", "NET60DAYS", "NET60DAY"}:
+        return "NET 60"
+    if compact in {"IMMEDIATE", "DUEONRECEIPT", "PAYABLEONRECEIPT"}:
+        return "DUE_ON_RECEIPT"
+    due_in_match = re.search(r"\bDUE\s+IN\s+(\d{1,3})\s+DAYS?\b", raw)
+    if due_in_match:
+        return f"NET {int(due_in_match.group(1))}"
+    net_match = re.search(r"\bNET\s*(\d{1,3})\s*(?:DAYS?)?\b", raw)
+    if net_match:
+        return f"NET {int(net_match.group(1))}"
+    return str(value).strip()
+
+
+def _payment_terms_from_text(*values: Any) -> str | None:
+    text = "\n".join(str(value or "") for value in values)
+    patterns = (
+        r"\bPAYMENT\s+TERMS?\s*[:\-]?\s*(NET\s*\d{1,3}(?:\s*DAYS?)?)",
+        r"\bTERMS?\s*[:\-]?\s*(NET\s*\d{1,3}(?:\s*DAYS?)?)",
+        r"\b(NET\s*\d{1,3}(?:\s*DAYS?)?)\b",
+        r"\b(DUE\s+IN\s+\d{1,3}\s+DAYS?)\b",
+        r"\b(DUE\s+ON\s+RECEIPT)\b",
+        r"\b(IMMEDIATE)\b",
+    )
+    upper_text = text.upper()
+    for pattern in patterns:
+        match = re.search(pattern, upper_text)
+        if match:
+            return _normalize_payment_terms(match.group(1))
+    return None
+
+
+def _payment_terms_from_row(row: dict[str, Any], raw_json: Any) -> str | None:
+    raw_json = raw_json if isinstance(raw_json, dict) else {}
+    return _first_non_empty(
+        _normalize_payment_terms(row.get("payment_terms")),
+        _normalize_payment_terms(raw_json.get("payment_terms")),
+        _payment_terms_from_text(
+            raw_json.get("structured_ocr_text"),
+            raw_json.get("raw_ocr_text"),
+        ),
+    )
+
+
+def _vendor_number_from_row(
+    row: dict[str, Any],
+    raw_json: Any,
+    vendor_name: str,
+) -> str:
+    raw_json = raw_json if isinstance(raw_json, dict) else {}
+    return _first_non_empty(
+        row.get("vendor_number"),
+        raw_json.get("vendor_number"),
+        _vendor_key(vendor_name),
+    )
+
+
 class APMasterTriggerService:
     """
     Detects new invoices in invoice_master and automatically sends
@@ -167,6 +240,8 @@ class APMasterTriggerService:
         self.orchestrator_factory = orchestrator_factory
 
     def _connect_master(self) -> Connection:
+        if self.master_engine is None:
+            init_master_schema_if_needed()
         return (self.master_engine or get_master_engine()).connect()
 
     def _orchestrator(self):
@@ -423,14 +498,17 @@ class APMasterTriggerService:
             table.c.invoice_number,
             table.c.po_number,
             table.c.vendor_name,
+            table.c.vendor_number,
             # Cast legacy SQLite text dates before SQLAlchemy's Date result
             # processor sees them. PostgreSQL dates safely cast to ISO text.
             cast(table.c.invoice_date, String).label("invoice_date"),
+            cast(table.c.due_date, String).label("due_date"),
             table.c.currency,
             table.c.document_subtotal,
             table.c.tax_amount,
             table.c.vat_percent,
             table.c.document_total,
+            table.c.payment_terms,
             table.c.payment_status,
             table.c.items_json,
             table.c.raw_json,
@@ -495,13 +573,15 @@ class APMasterTriggerService:
     ) -> Invoice:
         vendor_name = row.get("vendor_name") or "Unknown Vendor"
         raw_json = _load_json(row.get("raw_json"), {})
+        payment_terms = _payment_terms_from_row(row, raw_json)
+        vendor_number = _vendor_number_from_row(row, raw_json, vendor_name)
 
         invoice = Invoice(
             source="AP_MASTER_IMPORT",
             original_filename=f"{row.get('invoice_number')}.json",
             file_path="master_database",
             vendor_name=vendor_name,
-            vendor_number=_vendor_key(vendor_name),
+            vendor_number=vendor_number,
             invoice_number=row.get("invoice_number"),
             invoice_date=_parse_date(row.get("invoice_date")),
             po_number=row.get("po_number"),
@@ -509,11 +589,7 @@ class APMasterTriggerService:
             subtotal=float(row.get("document_subtotal") or 0),
             tax_amount=float(row.get("tax_amount") or 0),
             total_amount=float(row.get("document_total") or 0),
-            payment_terms=(
-                raw_json.get("payment_terms")
-                if isinstance(raw_json, dict)
-                else None
-            ),
+            payment_terms=payment_terms,
             posting_status=InvoicePostingStatus.NOT_POSTED,
             payment_status=normalize_payment_status(
                 row.get("payment_status")
@@ -526,6 +602,8 @@ class APMasterTriggerService:
                     row.get("last_modified")
                 ),
                 "payment_status": row.get("payment_status"),
+                "payment_terms": payment_terms,
+                "due_date": _json_compatible(row.get("due_date")),
                 "vat_percent": _json_compatible(
                     row.get("vat_percent")
                 ),
@@ -647,11 +725,13 @@ class APMasterTriggerService:
     def _refresh_agent_invoice(self, invoice: Invoice, row: dict) -> None:
         vendor_name = row.get("vendor_name") or "Unknown Vendor"
         raw_json = _load_json(row.get("raw_json"), {})
+        payment_terms = _payment_terms_from_row(row, raw_json)
+        vendor_number = _vendor_number_from_row(row, raw_json, vendor_name)
         invoice.source = "AP_MASTER_IMPORT"
         invoice.original_filename = f"{row.get('invoice_number')}.json"
         invoice.file_path = "master_database"
         invoice.vendor_name = vendor_name
-        invoice.vendor_number = _vendor_key(vendor_name)
+        invoice.vendor_number = vendor_number
         invoice.invoice_number = row.get("invoice_number")
         invoice.invoice_date = _parse_date(row.get("invoice_date"))
         invoice.po_number = row.get("po_number")
@@ -659,11 +739,7 @@ class APMasterTriggerService:
         invoice.subtotal = float(row.get("document_subtotal") or 0)
         invoice.tax_amount = float(row.get("tax_amount") or 0)
         invoice.total_amount = float(row.get("document_total") or 0)
-        invoice.payment_terms = (
-            raw_json.get("payment_terms")
-            if isinstance(raw_json, dict)
-            else None
-        )
+        invoice.payment_terms = payment_terms
         invoice.posting_status = InvoicePostingStatus.NOT_POSTED
         invoice.raw_payment_status = row.get("payment_status")
         invoice.payment_status = normalize_payment_status(
@@ -683,6 +759,8 @@ class APMasterTriggerService:
                 row.get("last_modified")
             ),
             "payment_status": row.get("payment_status"),
+            "payment_terms": payment_terms,
+            "due_date": _json_compatible(row.get("due_date")),
             "vat_percent": _json_compatible(
                 row.get("vat_percent")
             ),

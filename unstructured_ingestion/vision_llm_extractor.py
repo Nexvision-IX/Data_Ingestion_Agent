@@ -128,6 +128,49 @@ def normalize_ocr_text(text: str) -> str:
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
+
+def normalize_payment_terms(value: Any) -> str:
+    raw = safe_text(value).upper()
+    if not raw:
+        return ""
+
+    compact = re.sub(r"[^A-Z0-9]+", "", raw)
+    if compact in {"NET30", "N30", "NET30DAYS", "NET30DAY"}:
+        return "NET 30"
+    if compact in {"NET45", "N45", "NET45DAYS", "NET45DAY"}:
+        return "NET 45"
+    if compact in {"NET60", "N60", "NET60DAYS", "NET60DAY"}:
+        return "NET 60"
+    if compact in {"IMMEDIATE", "DUEONRECEIPT", "PAYABLEONRECEIPT"}:
+        return "DUE_ON_RECEIPT"
+
+    due_in_match = re.search(r"\bDUE\s+IN\s+(\d{1,3})\s+DAYS?\b", raw)
+    if due_in_match:
+        return f"NET {int(due_in_match.group(1))}"
+
+    net_match = re.search(r"\bNET\s*(\d{1,3})\s*(?:DAYS?)?\b", raw)
+    if net_match:
+        return f"NET {int(net_match.group(1))}"
+
+    return safe_text(value)
+
+
+def extract_payment_terms_from_text(text: str) -> str:
+    normalized = normalize_ocr_text(text).upper()
+    patterns = (
+        r"\bPAYMENT\s+TERMS?\s*[:\-]?\s*(NET\s*\d{1,3}(?:\s*DAYS?)?)",
+        r"\bTERMS?\s*[:\-]?\s*(NET\s*\d{1,3}(?:\s*DAYS?)?)",
+        r"\b(NET\s*\d{1,3}(?:\s*DAYS?)?)\b",
+        r"\b(DUE\s+IN\s+\d{1,3}\s+DAYS?)\b",
+        r"\b(DUE\s+ON\s+RECEIPT)\b",
+        r"\b(IMMEDIATE)\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, normalized)
+        if match:
+            return normalize_payment_terms(match.group(1))
+    return ""
+
 # =========================================================
 # PROMPT
 # =========================================================
@@ -163,6 +206,7 @@ Return exactly this schema:
   "invoice_number": "",
   "po_number": "",
   "vendor_name": "",
+  "vendor_number": "",
   "invoice_date": "",
   "due_date": "",
   "currency": "",
@@ -170,6 +214,7 @@ Return exactly this schema:
   "tax_amount": 0,
   "vat_percent": 0,
   "document_total": 0,
+  "payment_terms": "",
   "payment_status": "",
   "line_items": [
     {{
@@ -262,6 +307,7 @@ def normalize_invoice_schema(
         "invoice_number": safe_text(data.get("invoice_number")),
         "po_number": safe_text(data.get("po_number")),
         "vendor_name": safe_text(data.get("vendor_name")),
+        "vendor_number": safe_text(data.get("vendor_number")),
         "invoice_date": normalize_date(data.get("invoice_date")),
         "due_date": normalize_date(data.get("due_date")),
         "currency": currency,
@@ -269,6 +315,11 @@ def normalize_invoice_schema(
         "tax_amount": safe_float(data.get("tax_amount")),
         "vat_percent": safe_float(data.get("vat_percent")),
         "document_total": safe_float(data.get("document_total")),
+        "payment_terms": normalize_payment_terms(
+            data.get("payment_terms")
+        ) or extract_payment_terms_from_text(
+            "\n".join([structured_ocr_text or "", raw_ocr_text or ""])
+        ),
         "payment_status": safe_text(data.get("payment_status")),
         "line_items": normalize_line_items(data.get("line_items", [])),
         "last_modified": safe_text(data.get("last_modified")),

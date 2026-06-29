@@ -691,9 +691,10 @@ def build_mock_response_template(template_name, selected_invoice_row, validation
             "Please use the attached evidence and recheck the tax control."
         ),
         "Supplier confirms payment terms": (
-            f"Procurement confirms approved payment terms for {po_number} "
-            f"and {invoice_number} are NET 30. Please update the "
-            "PO/master payment terms and rerun validation."
+            f"Procurement confirms the approved payment terms for PO "
+            f"{po_number} and invoice {invoice_number} are NET 30. "
+            "Please update the PO master payment terms to NET 30 and "
+            "rerun AP validation."
         ),
         "General clarification": (
             f"Clarification received for invoice {invoice_number}. "

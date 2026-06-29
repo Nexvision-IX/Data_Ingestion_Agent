@@ -26,6 +26,7 @@ from ap_database.master_models import (
     SapGRNMaster,
     SapPOMaster,
 )
+from ap_database.master_repository import init_master_schema_if_needed
 
 
 def _vendor_key(value: str | None) -> str:
@@ -59,6 +60,13 @@ def _load_object(value: Any) -> dict[str, Any]:
         return {}
 
 
+def _first_non_empty(*values: Any) -> Any:
+    for value in values:
+        if value not in (None, ""):
+            return value
+    return None
+
+
 class APMasterGateway(SAPGateway):
     """Read AP master context through the configured shared database engine."""
 
@@ -68,6 +76,7 @@ class APMasterGateway(SAPGateway):
         del path
 
     def _connect(self) -> Connection:
+        init_master_schema_if_needed()
         return get_master_engine().connect()
 
     def get_invoice_context(self, invoice: Invoice) -> dict[str, Any]:
@@ -112,10 +121,12 @@ class APMasterGateway(SAPGateway):
         statement = select(
             table.c.po_number,
             table.c.vendor_name,
+            table.c.vendor_number,
             cast(table.c.po_date, String).label("po_date"),
             table.c.currency,
             table.c.tax_amount,
             table.c.vat_percent,
+            table.c.payment_terms,
             table.c.po_status,
             table.c.items_json,
             table.c.raw_json,
@@ -142,9 +153,18 @@ class APMasterGateway(SAPGateway):
         vendor_name = row.get("vendor_name") or ""
         raw_status = row.get("po_status")
         raw_json = _load_object(row.get("raw_json"))
+        vendor_number = _first_non_empty(
+            row.get("vendor_number"),
+            raw_json.get("vendor_number"),
+            _vendor_key(vendor_name),
+        )
+        payment_terms = _first_non_empty(
+            row.get("payment_terms"),
+            raw_json.get("payment_terms"),
+        )
         return normalize_po({
             "po_number": row.get("po_number"),
-            "vendor_number": _vendor_key(vendor_name),
+            "vendor_number": vendor_number,
             "vendor_name": vendor_name,
             "po_date": row.get("po_date"),
             "company_code": "1000",
@@ -159,7 +179,7 @@ class APMasterGateway(SAPGateway):
                 if row.get("vat_percent") is not None
                 else None
             ),
-            "payment_terms": raw_json.get("payment_terms"),
+            "payment_terms": payment_terms,
             "status": raw_status,
             "raw_status": raw_status,
             "items": items,

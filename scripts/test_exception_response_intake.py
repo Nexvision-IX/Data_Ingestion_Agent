@@ -21,6 +21,7 @@ from app.models import (  # noqa: E402
     ValidationResult,
     WorkflowEvent,
 )
+import app.services.exception_response_intake_service as response_service_module  # noqa: E402
 from app.services.exception_response_intake_service import (  # noqa: E402
     ExceptionResponseIntakeService,
 )
@@ -68,6 +69,7 @@ def make_case(
     status: str = "EXCEPTION_IDENTIFIED",
     po_number: str | None = None,
     payment_terms: str | None = None,
+    category: str = "PO_MISSING",
 ) -> tuple[Invoice, ExceptionCase, Communication]:
     invoice = Invoice(
         source="TEST",
@@ -90,7 +92,7 @@ def make_case(
     )
     exception = ExceptionCase(
         invoice=invoice,
-        category="PO_MISSING",
+        category=category,
         classifier_confidence=1,
         classifier_rationale="PO is missing.",
         priority="HIGH",
@@ -122,6 +124,27 @@ def main() -> None:
         )
         Base.metadata.create_all(engine)
         with Session(engine, expire_on_commit=False) as db:
+            master_updates = []
+
+            def fake_init_master_schema_if_needed():
+                return None
+
+            def fake_update_payment_terms(table_name, primary_key_value, payment_terms):
+                result = {
+                    "updated": True,
+                    "table_name": table_name,
+                    "primary_key_value": primary_key_value,
+                    "old_value": None,
+                    "new_value": payment_terms,
+                }
+                master_updates.append(result)
+                return result
+
+            response_service_module.init_master_schema_if_needed = (
+                fake_init_master_schema_if_needed
+            )
+            response_service_module.update_payment_terms = fake_update_payment_terms
+
             service = ExceptionResponseIntakeService(
                 db, orchestrator_factory=RecordingOrchestrator
             )
@@ -155,8 +178,60 @@ def main() -> None:
                     "resume_recheck": False,
                 },
             )
-            assert terms_invoice.payment_terms == "NET45"
+            assert terms_invoice.payment_terms == "NET 45"
             assert "payment_terms" in terms_result["updated_fields"]
+
+            terms_master_invoice, terms_master_exception, _ = make_case(
+                db,
+                suffix="TERMS-MASTER",
+                po_number="PO-CLEAN-001",
+                payment_terms="NET 45",
+                category="PAYMENT_TERMS_MISMATCH",
+            )
+            terms_master_result = service.ingest_response(
+                terms_master_exception,
+                {
+                    "source": "PROCUREMENT",
+                    "response_text": (
+                        "Procurement confirms approved payment terms for "
+                        "PO-CLEAN-001 and INV-CLEAN-001 are NET 30. "
+                        "Please update the PO/master payment terms and "
+                        "rerun validation."
+                    ),
+                    "resume_recheck": True,
+                },
+            )
+            assert terms_master_result["evidence"][
+                "PAYMENT_TERMS_PROVIDED"
+            ]["payment_terms"] == "NET 30"
+            assert terms_master_invoice.payment_terms == "NET 30"
+            assert terms_master_result["updated_fields"][
+                "master_payment_terms"
+            ]["table_name"] == "sap_po_master"
+            assert master_updates[-1]["primary_key_value"] == "PO-CLEAN-001"
+            assert terms_master_result["resumed_recheck"] is True
+            assert terms_master_exception.status == "RESOLVED"
+
+            vague_terms_invoice, vague_terms_exception, _ = make_case(
+                db,
+                suffix="TERMS-VAGUE",
+                po_number="PO-CLEAN-001",
+                payment_terms="NET 45",
+                category="PAYMENT_TERMS_MISMATCH",
+            )
+            vague_result = service.ingest_response(
+                vague_terms_exception,
+                {
+                    "source": "PROCUREMENT",
+                    "response_text": "Procurement is checking this.",
+                    "resume_recheck": True,
+                },
+            )
+            assert vague_result["resumed_recheck"] is False
+            assert "no approved payment term" in vague_result[
+                "recheck_skip_reason"
+            ]
+            assert vague_terms_invoice.status == "EXCEPTION_IDENTIFIED"
 
             general_invoice, general_exception, _ = make_case(
                 db,

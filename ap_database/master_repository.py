@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import delete, inspect, select, text
+from sqlalchemy import delete, inspect, select, text, update
 from sqlalchemy.engine import Connection
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -24,6 +25,36 @@ from ap_database.master_models import (
 from ap_database.settings import is_postgres_url, settings
 
 ALLOWED_MASTER_TABLES = frozenset(MASTER_TABLE_MODELS)
+
+LOCAL_SQLITE_COLUMN_TYPES = {
+    "invoice_master": {
+        "vendor_number": "TEXT",
+        "due_date": "TEXT",
+        "payment_terms": "TEXT",
+        "created_at": "TEXT",
+        "updated_at": "TEXT",
+    },
+    "sap_po_master": {
+        "vendor_number": "TEXT",
+        "payment_terms": "TEXT",
+        "created_at": "TEXT",
+        "updated_at": "TEXT",
+    },
+    "sap_grn_master": {
+        "vendor_number": "TEXT",
+        "created_at": "TEXT",
+        "updated_at": "TEXT",
+    },
+    "sap_posted_invoice_master": {
+        "vendor_number": "TEXT",
+        "due_date": "TEXT",
+        "payment_terms": "TEXT",
+        "created_at": "TEXT",
+        "updated_at": "TEXT",
+    },
+}
+
+
 class DestructiveMasterOperationBlocked(RuntimeError):
     """Raised when a destructive master-data operation is blocked."""
 
@@ -37,7 +68,6 @@ SAFE_RUNTIME_ENVIRONMENTS = {
     "prod",
     "staging",
     "stage",
-    "demo",
     "aws",
 }
 
@@ -150,10 +180,147 @@ def _as_json(value: Any, default: Any) -> Any:
     return value
 
 
-def _common_document_values(payload: dict[str, Any]) -> dict[str, Any]:
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(_json_safe(key)): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    return str(value)
+
+
+def _clean_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    return cleaned or None
+
+
+def _first_non_empty(*values: Any) -> Any:
+    for value in values:
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _normalize_payment_terms(value: Any) -> str | None:
+    raw = str(value or "").strip().upper()
+    if not raw:
+        return None
+
+    compact = re.sub(r"[^A-Z0-9]+", "", raw)
+    if compact in {"NET30", "N30", "NET30DAYS", "NET30DAY"}:
+        return "NET 30"
+    if compact in {"NET45", "N45", "NET45DAYS", "NET45DAY"}:
+        return "NET 45"
+    if compact in {"NET60", "N60", "NET60DAYS", "NET60DAY"}:
+        return "NET 60"
+    if compact in {"IMMEDIATE", "DUEONRECEIPT", "PAYABLEONRECEIPT"}:
+        return "DUE_ON_RECEIPT"
+
+    due_in_match = re.search(r"\bDUE\s+IN\s+(\d{1,3})\s+DAYS?\b", raw)
+    if due_in_match:
+        return f"NET {int(due_in_match.group(1))}"
+
+    net_match = re.search(r"\bNET\s*(\d{1,3})\s*(?:DAYS?)?\b", raw)
+    if net_match:
+        return f"NET {int(net_match.group(1))}"
+
+    return str(value).strip()
+
+
+def _extract_payment_terms_from_text(*values: Any) -> str | None:
+    text_value = "\n".join(str(value or "") for value in values).upper()
+    patterns = (
+        r"\bPAYMENT\s+TERMS?\s*[:\-]?\s*(NET\s*\d{1,3}(?:\s*DAYS?)?)",
+        r"\bTERMS?\s*[:\-]?\s*(NET\s*\d{1,3}(?:\s*DAYS?)?)",
+        r"\b(NET\s*\d{1,3}(?:\s*DAYS?)?)\b",
+        r"\b(DUE\s+IN\s+\d{1,3}\s+DAYS?)\b",
+        r"\b(DUE\s+ON\s+RECEIPT)\b",
+        r"\b(IMMEDIATE)\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text_value)
+        if match:
+            return _normalize_payment_terms(match.group(1))
+    return None
+
+
+def _merge_raw_json(
+    payload: dict[str, Any],
+    existing_raw_json: Any = None,
+) -> dict[str, Any]:
+    existing = _as_json(existing_raw_json, {})
+    if not isinstance(existing, dict):
+        existing = {}
+
+    incoming = _as_json(payload.get("raw_json"), payload)
+    if not isinstance(incoming, dict):
+        incoming = {}
+
+    merged = dict(existing)
+    for key, value in incoming.items():
+        if value not in (None, ""):
+            merged[key] = value
+
+    for key in ("payment_terms", "due_date", "vendor_number"):
+        value = _clean_text(payload.get(key))
+        if value:
+            merged[key] = value
+
+    terms = _first_non_empty(
+        _normalize_payment_terms(merged.get("payment_terms")),
+        _extract_payment_terms_from_text(
+            merged.get("structured_ocr_text"),
+            merged.get("raw_ocr_text"),
+        ),
+    )
+    if terms:
+        merged["payment_terms"] = terms
+
+    return _json_safe(merged)
+
+
+def _fetch_existing_row(
+    table_name: str,
+    primary_key_value: Any,
+    connection: Connection | None = None,
+) -> dict[str, Any]:
+    if primary_key_value in (None, ""):
+        return {}
+
+    table = _get_model(table_name).__table__
+    primary_key = next(iter(table.primary_key.columns))
+    statement = select(table).where(primary_key == primary_key_value)
+
+    if connection is not None:
+        row = connection.execute(statement).mappings().first()
+        return dict(row) if row else {}
+
+    with get_master_engine().connect() as managed_connection:
+        row = managed_connection.execute(statement).mappings().first()
+        return dict(row) if row else {}
+
+
+def _common_document_values(
+    payload: dict[str, Any],
+    existing: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    existing = existing or {}
+    raw_json = _merge_raw_json(payload, existing.get("raw_json"))
     return {
         "po_number": payload.get("po_number"),
         "vendor_name": payload.get("vendor_name"),
+        "vendor_number": _first_non_empty(
+            _clean_text(payload.get("vendor_number")),
+            existing.get("vendor_number"),
+            raw_json.get("vendor_number"),
+        ),
         "currency": payload.get("currency"),
         "document_subtotal": _as_decimal(payload.get("document_subtotal")),
         "tax_amount": _as_decimal(payload.get("tax_amount")),
@@ -162,7 +329,7 @@ def _common_document_values(payload: dict[str, Any]) -> dict[str, Any]:
         "items_json": _as_json(
             payload.get("line_items", payload.get("items_json")), []
         ),
-        "raw_json": _as_json(payload.get("raw_json"), payload),
+        "raw_json": raw_json,
         "updated_at": datetime.now(timezone.utc),
     }
 
@@ -218,6 +385,92 @@ def init_master_schema_if_needed() -> None:
             connection.execute(text('CREATE SCHEMA IF NOT EXISTS "master"'))
 
     MasterBase.metadata.create_all(bind=engine)
+    _migrate_local_sqlite_schema(engine)
+
+
+def _migrate_local_sqlite_schema(engine) -> None:
+    """Add missing local SQLite columns without dropping or recreating data."""
+    if engine.dialect.name != "sqlite":
+        return
+
+    with engine.begin() as connection:
+        for table_name, required_columns in LOCAL_SQLITE_COLUMN_TYPES.items():
+            existing_columns = {
+                row[1]
+                for row in connection.execute(
+                    text(f'PRAGMA table_info("{table_name}")')
+                )
+            }
+            for column_name, column_type in required_columns.items():
+                if column_name in existing_columns:
+                    continue
+                connection.execute(
+                    text(
+                        f'ALTER TABLE "{table_name}" '
+                        f'ADD COLUMN "{column_name}" {column_type}'
+                    )
+                )
+        _backfill_local_sqlite_payment_terms(connection)
+
+
+def _backfill_local_sqlite_payment_terms(connection: Connection) -> None:
+    table_configs = {
+        "invoice_master": "invoice_number",
+        "sap_po_master": "po_number",
+        "sap_posted_invoice_master": "invoice_number",
+    }
+
+    for table_name, primary_key in table_configs.items():
+        columns = {
+            row[1]
+            for row in connection.execute(
+                text(f'PRAGMA table_info("{table_name}")')
+            )
+        }
+        if "payment_terms" not in columns or "raw_json" not in columns:
+            continue
+
+        rows = connection.execute(
+            text(
+                f'SELECT "{primary_key}", "payment_terms", "raw_json" '
+                f'FROM "{table_name}"'
+            )
+        ).mappings().all()
+
+        for row in rows:
+            raw_json = _as_json(row.get("raw_json"), {})
+            if not isinstance(raw_json, dict):
+                raw_json = {}
+
+            terms = _first_non_empty(
+                _normalize_payment_terms(row.get("payment_terms")),
+                _normalize_payment_terms(raw_json.get("payment_terms")),
+                _extract_payment_terms_from_text(
+                    raw_json.get("structured_ocr_text"),
+                    raw_json.get("raw_ocr_text"),
+                ),
+            )
+            if not terms:
+                continue
+
+            updates = {}
+            if terms != row.get("payment_terms"):
+                updates["payment_terms"] = terms
+            if raw_json.get("payment_terms") != terms:
+                raw_json["payment_terms"] = terms
+                updates["raw_json"] = json.dumps(raw_json, default=str)
+            if not updates:
+                continue
+
+            assignments = ", ".join(f'"{column}" = :{column}' for column in updates)
+            updates["primary_key_value"] = row.get(primary_key)
+            connection.execute(
+                text(
+                    f'UPDATE "{table_name}" SET {assignments} '
+                    f'WHERE "{primary_key}" = :primary_key_value'
+                ),
+                updates,
+            )
 
 
 def test_master_repository_connection() -> bool:
@@ -267,10 +520,28 @@ def upsert_invoice(
     payload: dict[str, Any],
     connection: Connection | None = None,
 ) -> None:
-    values = _common_document_values(payload)
+    existing = _fetch_existing_row(
+        "invoice_master",
+        payload.get("invoice_number"),
+        connection,
+    )
+    values = _common_document_values(payload, existing)
+    raw_json = values["raw_json"]
     values.update(
         invoice_number=payload.get("invoice_number"),
         invoice_date=_as_date(payload.get("invoice_date")),
+        due_date=_as_date(
+            _first_non_empty(
+                payload.get("due_date"),
+                raw_json.get("due_date") if isinstance(raw_json, dict) else None,
+                existing.get("due_date"),
+            )
+        ),
+        payment_terms=_first_non_empty(
+            _normalize_payment_terms(payload.get("payment_terms")),
+            raw_json.get("payment_terms") if isinstance(raw_json, dict) else None,
+            existing.get("payment_terms"),
+        ),
         payment_status=payload.get("payment_status"),
         last_modified=_as_datetime(payload.get("last_modified")),
     )
@@ -281,10 +552,21 @@ def upsert_po(
     payload: dict[str, Any],
     connection: Connection | None = None,
 ) -> None:
-    values = _common_document_values(payload)
+    existing = _fetch_existing_row(
+        "sap_po_master",
+        payload.get("po_number"),
+        connection,
+    )
+    values = _common_document_values(payload, existing)
+    raw_json = values["raw_json"]
     values.update(
         po_number=payload.get("po_number"),
         po_date=_as_date(payload.get("po_date")),
+        payment_terms=_first_non_empty(
+            _normalize_payment_terms(payload.get("payment_terms")),
+            raw_json.get("payment_terms") if isinstance(raw_json, dict) else None,
+            existing.get("payment_terms"),
+        ),
         po_status=payload.get("po_status"),
         last_modified=_as_datetime(payload.get("last_modified")),
     )
@@ -312,10 +594,28 @@ def upsert_posted_invoice(
     payload: dict[str, Any],
     connection: Connection | None = None,
 ) -> None:
-    values = _common_document_values(payload)
+    existing = _fetch_existing_row(
+        "sap_posted_invoice_master",
+        payload.get("invoice_number"),
+        connection,
+    )
+    values = _common_document_values(payload, existing)
+    raw_json = values["raw_json"]
     values.update(
         invoice_number=payload.get("invoice_number"),
         invoice_date=_as_date(payload.get("invoice_date")),
+        due_date=_as_date(
+            _first_non_empty(
+                payload.get("due_date"),
+                raw_json.get("due_date") if isinstance(raw_json, dict) else None,
+                existing.get("due_date"),
+            )
+        ),
+        payment_terms=_first_non_empty(
+            _normalize_payment_terms(payload.get("payment_terms")),
+            raw_json.get("payment_terms") if isinstance(raw_json, dict) else None,
+            existing.get("payment_terms"),
+        ),
         payment_status=payload.get("payment_status"),
         sap_document_number=payload.get("sap_document_number"),
         posting_status=payload.get("posting_status", "POSTED"),
@@ -325,6 +625,77 @@ def upsert_posted_invoice(
         or datetime.now(timezone.utc),
     )
     _upsert("sap_posted_invoice_master", values, connection)
+
+
+def update_payment_terms(
+    table_name: str,
+    primary_key_value: str,
+    payment_terms: str,
+) -> dict:
+    """Update payment terms on supported AP master tables."""
+    supported_tables = {
+        "invoice_master",
+        "sap_po_master",
+        "sap_posted_invoice_master",
+    }
+    if table_name not in supported_tables:
+        allowed = ", ".join(sorted(supported_tables))
+        raise ValueError(
+            f"Unsupported payment terms table: {table_name!r}. "
+            f"Allowed tables: {allowed}"
+        )
+    if not primary_key_value:
+        raise ValueError("primary_key_value is required.")
+
+    normalized_terms = _normalize_payment_terms(payment_terms)
+    if not normalized_terms:
+        raise ValueError("payment_terms is required.")
+
+    init_master_schema_if_needed()
+
+    table = _get_model(table_name).__table__
+    primary_key = next(iter(table.primary_key.columns))
+
+    with get_master_engine().begin() as connection:
+        existing_row = connection.execute(
+            select(table).where(primary_key == primary_key_value)
+        ).mappings().first()
+        if existing_row is None:
+            return {
+                "table_name": table_name,
+                "primary_key_value": primary_key_value,
+                "payment_terms": normalized_terms,
+                "rows_updated": 0,
+                "status": "not_found",
+            }
+
+        raw_json = _as_json(existing_row.get("raw_json"), {})
+        if not isinstance(raw_json, dict):
+            raw_json = {}
+        raw_json["payment_terms"] = normalized_terms
+        raw_json["terms"] = normalized_terms
+
+        values = {
+            "payment_terms": normalized_terms,
+            "raw_json": _json_safe(raw_json),
+        }
+        if "updated_at" in table.c:
+            values["updated_at"] = datetime.now(timezone.utc)
+
+        result = connection.execute(
+            update(table)
+            .where(primary_key == primary_key_value)
+            .values(**values)
+        )
+
+    rows_updated = int(result.rowcount or 0)
+    return {
+        "table_name": table_name,
+        "primary_key_value": primary_key_value,
+        "payment_terms": normalized_terms,
+        "rows_updated": rows_updated,
+        "status": "updated" if rows_updated else "not_found",
+    }
 
 
 def _delete_by_primary_key(table_name: str, value: str) -> None:

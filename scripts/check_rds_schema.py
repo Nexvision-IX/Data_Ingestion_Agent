@@ -31,6 +31,87 @@ REQUIRED_MASTER_TABLES = {
     "sap_posted_invoice_master",
 }
 
+REQUIRED_MASTER_COLUMNS = {
+    "invoice_master": {
+        "invoice_number",
+        "po_number",
+        "vendor_name",
+        "vendor_number",
+        "invoice_date",
+        "due_date",
+        "currency",
+        "document_subtotal",
+        "tax_amount",
+        "vat_percent",
+        "document_total",
+        "payment_terms",
+        "payment_status",
+        "items_json",
+        "raw_json",
+        "last_modified",
+        "created_at",
+        "updated_at",
+    },
+    "sap_po_master": {
+        "po_number",
+        "vendor_name",
+        "vendor_number",
+        "po_date",
+        "currency",
+        "document_subtotal",
+        "tax_amount",
+        "vat_percent",
+        "document_total",
+        "payment_terms",
+        "po_status",
+        "items_json",
+        "raw_json",
+        "last_modified",
+        "created_at",
+        "updated_at",
+    },
+    "sap_grn_master": {
+        "gr_number",
+        "po_number",
+        "vendor_name",
+        "vendor_number",
+        "gr_date",
+        "currency",
+        "document_subtotal",
+        "document_total",
+        "gr_status",
+        "items_json",
+        "raw_json",
+        "last_modified",
+        "created_at",
+        "updated_at",
+    },
+    "sap_posted_invoice_master": {
+        "invoice_number",
+        "po_number",
+        "vendor_name",
+        "vendor_number",
+        "invoice_date",
+        "due_date",
+        "currency",
+        "document_subtotal",
+        "tax_amount",
+        "vat_percent",
+        "document_total",
+        "payment_terms",
+        "payment_status",
+        "items_json",
+        "raw_json",
+        "sap_document_number",
+        "posting_status",
+        "posting_message",
+        "source_system",
+        "posted_at",
+        "created_at",
+        "updated_at",
+    },
+}
+
 REQUIRED_AGENT_TABLES = {
     "invoice_artifacts",
     "invoices",
@@ -105,6 +186,23 @@ def main() -> int:
             )
         else:
             print("[SUCCESS] All required master tables exist.")
+            for table_name, required_columns in REQUIRED_MASTER_COLUMNS.items():
+                missing_columns = _missing_columns(
+                    get_master_engine(),
+                    table_name,
+                    required_columns,
+                    MASTER_SCHEMA,
+                )
+                if missing_columns:
+                    success = False
+                    print(
+                        f"[FAILURE] Missing {table_name} columns: "
+                        + ", ".join(missing_columns)
+                    )
+                else:
+                    print(
+                        f"[SUCCESS] Required {table_name} columns exist."
+                    )
     except Exception as exc:
         success = False
         print(

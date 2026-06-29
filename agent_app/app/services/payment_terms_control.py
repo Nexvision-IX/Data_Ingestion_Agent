@@ -20,11 +20,11 @@ _TERM_DAYS = {
 def normalize_payment_terms(value: Any) -> str:
     raw = str(value or "").strip().upper()
     compact = _SEPARATORS.sub("", raw)
-    if compact in {"NET30", "N30"}:
+    if compact in {"NET30", "N30", "NET30DAYS", "NET30DAY"}:
         return "NET30"
-    if compact in {"NET45", "N45"}:
+    if compact in {"NET45", "N45", "NET45DAYS", "NET45DAY"}:
         return "NET45"
-    if compact in {"NET60", "N60"}:
+    if compact in {"NET60", "N60", "NET60DAYS", "NET60DAY"}:
         return "NET60"
     if compact in {"DUEONRECEIPT", "IMMEDIATE"}:
         return "DUE_ON_RECEIPT"
@@ -83,11 +83,9 @@ class PaymentTermsControl:
         terms_present = invoice_terms != "UNKNOWN"
         reference_available = reference_source is not None
         terms_match = (
-            not reference_available
-            or (
-                reference_terms != "UNKNOWN"
-                and invoice_terms == reference_terms
-            )
+            reference_available
+            and reference_terms != "UNKNOWN"
+            and invoice_terms == reference_terms
         )
         due_date_matches = (
             terms_present
@@ -146,8 +144,18 @@ class PaymentTermsControl:
                         "comparison was not performed."
                         if not reference_available
                         else (
-                            "Invoice payment terms do not match the "
-                            "approved reference."
+                            "Invoice payment terms are missing or "
+                            "unrecognized."
+                            if not terms_present
+                            else (
+                                "Approved reference payment terms are "
+                                "missing or unrecognized."
+                                if reference_terms == "UNKNOWN"
+                                else (
+                                    "Invoice payment terms do not match the "
+                                    "approved reference."
+                                )
+                            )
                         )
                     )
                 ),
