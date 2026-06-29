@@ -733,6 +733,136 @@ def render_invoice_journey_tracker(selected_invoice, validation_df, communicatio
     render_stage_cards(stages)
 
 
+def _load_agent_optional_dataframe(statement, params):
+    try:
+        import pandas as pd
+        from sqlalchemy import text
+        from ap_database.engines import get_agent_session_factory
+
+        if not ap_agent_db_exists():
+            return pd.DataFrame()
+        session_factory = get_agent_session_factory()
+        with session_factory() as session:
+            return pd.read_sql_query(
+                text(statement),
+                session.connection(),
+                params=params,
+            )
+    except Exception:
+        import pandas as pd
+
+        return pd.DataFrame()
+
+
+def load_exception_cases_for_invoice(selected_invoice):
+    return _load_agent_optional_dataframe(
+        """
+        SELECT
+            ec.category,
+            ec.classifier_rationale AS description,
+            ec.status,
+            ec.owner_team AS owner,
+            ec.priority,
+            ec.resolution_strategy,
+            ec.created_at,
+            ec.updated_at
+        FROM exception_cases ec
+        JOIN invoices i ON i.id = ec.invoice_id
+        WHERE i.invoice_number = :invoice_number
+        ORDER BY ec.created_at DESC, ec.id DESC
+        """,
+        {"invoice_number": selected_invoice},
+    )
+
+
+def load_posting_attempts_for_invoice(selected_invoice):
+    return _load_agent_optional_dataframe(
+        """
+        SELECT
+            pa.created_at,
+            pa.status,
+            pa.sap_document_number,
+            pa.message
+        FROM posting_attempts pa
+        JOIN invoices i ON i.id = pa.invoice_id
+        WHERE i.invoice_number = :invoice_number
+        ORDER BY pa.created_at DESC, pa.id DESC
+        """,
+        {"invoice_number": selected_invoice},
+    )
+
+
+def load_consumption_ledger_for_invoice(selected_invoice):
+    return _load_agent_optional_dataframe(
+        """
+        SELECT
+            cl.po_number,
+            cl.grn_number,
+            cl.invoice_number,
+            cl.po_item AS line_no,
+            cl.quantity AS consumed_qty,
+            cl.amount AS consumed_amount,
+            cl.ledger_status,
+            cl.created_at
+        FROM po_grn_consumption_ledger cl
+        WHERE cl.invoice_number = :invoice_number
+        ORDER BY cl.created_at DESC, cl.id DESC
+        """,
+        {"invoice_number": selected_invoice},
+    )
+
+
+def render_status_explanation(workflow_status, posting_status, payment_status):
+    status = str(workflow_status or "UNKNOWN")
+    explanations = {
+        "POSTED": "Invoice was posted successfully. Payment remains separate.",
+        "READY_FOR_POSTING": "Invoice passed blocking AP controls and is ready to post.",
+        "EXCEPTION_IDENTIFIED": "Invoice has a blocking exception. Review failed controls and communication.",
+        "EXTRACTION_REVIEW_REQUIRED": "Invoice extraction requires review before validation can proceed.",
+        "EXTRACTION_FAILED": "Invoice could not be extracted reliably.",
+        "POSTING_FAILED": "Invoice passed validation but failed posting.",
+        "VALIDATION_IN_PROGRESS": "Invoice is currently moving through validation.",
+        "REPROCESS_REQUESTED": "Invoice is queued for controlled recheck.",
+        "REPROCESS_FAILED": "Controlled recheck ran but the invoice is still blocked.",
+    }
+    next_actions = {
+        "POSTED": "Review posting details and remember payment is tracked separately.",
+        "READY_FOR_POSTING": "Proceed with posting when the demo flow requires it.",
+        "EXCEPTION_IDENTIFIED": "Review failed validation controls and communication.",
+        "EXTRACTION_REVIEW_REQUIRED": "Review extracted fields before continuing.",
+        "EXTRACTION_FAILED": "Upload a clearer invoice or correct the extraction source.",
+        "POSTING_FAILED": "Review the posting attempt message.",
+        "VALIDATION_IN_PROGRESS": "Refresh after validation completes.",
+        "REPROCESS_REQUESTED": "Run or wait for controlled recheck.",
+        "REPROCESS_FAILED": "Review remaining failed controls.",
+    }
+    render_metric_cards(
+        [
+            {
+                "title": "Workflow status",
+                "value": workflow_status,
+                "help_text": explanations.get(status, "Review workflow events for latest status."),
+            },
+            {
+                "title": "Posting status",
+                "value": posting_status,
+                "help_text": "Posting and payment are separate.",
+            },
+            {
+                "title": "Payment status",
+                "value": payment_status,
+                "help_text": "Payment should come from ERP/payment-run data.",
+            },
+            {
+                "title": "Recommended next action",
+                "value": next_actions.get(status, "Review workflow events for latest status."),
+                "help_text": "Operational guidance",
+            },
+        ],
+        columns=2,
+    )
+
+
 def api_health(url):
     try:
         response = requests.get(f"{url.rstrip('/')}/health", timeout=3)
@@ -1385,239 +1515,583 @@ def render_invoice_journey():
 
 
 def render_ap_agent_workbench():
+    st.title("AP Agent Workbench")
     render_section_help(
-        "Use this page to select any invoice and inspect everything the AP Agent did for that invoice."
-    )
-
-    st.header("AP Agent Processing Monitor")
-
-    st.write(
-        """
-        This view shows what happened after invoices entered the AP Agent workflow:
-        - Posted invoices
-        - Exception invoices
-        - Failed validation rules
-        - Posting attempts
-        - Agent workflow events
-        """
+        "Use this page to inspect everything the AP Agent did for a selected invoice — validations, exceptions, communication, recheck events, posting attempts, and audit trail."
     )
 
     if not ap_agent_db_exists():
-
         st.warning(
-            "AP Agent database not found yet. "
-            "Run invoice processing first so agent_app/ap_agent.db is created."
+            "AP Agent database not found yet. Process an invoice first from Invoice Journey."
         )
+        return
 
-    else:
+    summary_df = load_ap_agent_summary()
+    agent_df = load_ap_agent_invoices(limit=500)
 
-        summary_df = load_ap_agent_summary()
+    if agent_df.empty:
+        st.info("No AP Agent invoice records found yet. Upload or create an invoice to begin.")
+        return
 
-        if summary_df.empty:
+    st.subheader("Status Summary")
+    status_counts = get_status_counts(summary_df)
+    render_metric_cards(
+        [
+            {
+                "title": "Total Agent Records",
+                "value": sum(status_counts.values()) if status_counts else len(agent_df),
+                "help_text": "Invoices tracked by the AP Agent",
+            },
+            {
+                "title": "Posted",
+                "value": status_counts.get("POSTED", 0),
+                "help_text": "Posted successfully",
+            },
+            {
+                "title": "Ready for Posting",
+                "value": status_counts.get("READY_FOR_POSTING", 0),
+                "help_text": "Passed blocking controls",
+            },
+            {
+                "title": "Exceptions",
+                "value": status_counts.get("EXCEPTION_IDENTIFIED", 0),
+                "help_text": "Needs action",
+            },
+            {
+                "title": "Extraction Review",
+                "value": status_counts.get("EXTRACTION_REVIEW_REQUIRED", 0),
+                "help_text": "Needs extraction review",
+            },
+            {
+                "title": "Posting Failed",
+                "value": status_counts.get("POSTING_FAILED", 0),
+                "help_text": "Posting attempt failed",
+            },
+        ],
+        columns=3,
+    )
 
-            st.info(
-                "No AP Agent records found yet."
+    st.subheader("Find an Invoice")
+    filtered_df = agent_df.copy()
+    if "agent_status" in filtered_df.columns and "status" not in filtered_df.columns:
+        filtered_df["status"] = filtered_df["agent_status"]
+
+    search_text = st.text_input(
+        "Search invoice, vendor, or PO",
+        key="agent_workbench_search",
+    ).strip().lower()
+    if search_text:
+        searchable_columns = [
+            column
+            for column in ["invoice_number", "vendor_name", "po_number"]
+            if column in filtered_df.columns
+        ]
+        if searchable_columns:
+            mask = filtered_df[searchable_columns].fillna("").astype(str).apply(
+                lambda row: search_text in " ".join(row).lower(),
+                axis=1,
             )
+            filtered_df = filtered_df[mask]
 
-        else:
-
-            st.subheader("AP Agent Status Summary")
-
-            status_counts = {
-                row["status"]: row["total"]
-                for _, row in summary_df.iterrows()
-            }
-
-            col1, col2, col3, col4 = st.columns(4)
-
-            with col1:
-                st.metric(
-                    "Posted",
-                    status_counts.get("POSTED", 0)
+    filter_cols = st.columns(3)
+    with filter_cols[0]:
+        status_options = ["All"]
+        if "status" in filtered_df.columns:
+            status_options.extend(
+                sorted(
+                    value
+                    for value in filtered_df["status"].dropna().astype(str).unique()
+                    if value
                 )
-
-            with col2:
-                st.metric(
-                    "Exceptions",
-                    status_counts.get("EXCEPTION_IDENTIFIED", 0)
-                )
-
-            with col3:
-                st.metric(
-                    "Extracted",
-                    status_counts.get("EXTRACTED", 0)
-                )
-
-            with col4:
-                st.metric(
-                    "Total Agent Records",
-                    int(summary_df["total"].sum())
-                )
-
-            st.dataframe(
-                summary_df,
-                use_container_width=True
             )
-
-        st.divider()
-
-        st.subheader("AP Agent Invoice Status")
-
-        limit = st.number_input(
+        selected_status = st.selectbox(
+            "Status",
+            status_options,
+            key="agent_workbench_status_filter",
+        )
+    with filter_cols[1]:
+        vendor_options = ["All"]
+        if "vendor_name" in filtered_df.columns:
+            vendor_options.extend(
+                sorted(
+                    value
+                    for value in filtered_df["vendor_name"].dropna().astype(str).unique()
+                    if value
+                )
+            )
+        selected_vendor = st.selectbox(
+            "Vendor",
+            vendor_options,
+            key="agent_workbench_vendor_filter",
+        )
+    with filter_cols[2]:
+        rows_to_show = st.number_input(
             "Rows to show",
             min_value=10,
             max_value=500,
             value=50,
-            step=10
+            step=10,
+            key="agent_workbench_rows",
         )
 
-        agent_df = load_ap_agent_invoices(
-            limit=limit
+    if selected_status != "All" and "status" in filtered_df.columns:
+        filtered_df = filtered_df[filtered_df["status"].astype(str) == selected_status]
+    if selected_vendor != "All" and "vendor_name" in filtered_df.columns:
+        filtered_df = filtered_df[filtered_df["vendor_name"].astype(str) == selected_vendor]
+
+    filtered_df = filtered_df.head(int(rows_to_show))
+    business_dataframe(
+        filtered_df,
+        [
+            "invoice_number",
+            "vendor_name",
+            "po_number",
+            "total_amount",
+            "document_total",
+            "amount",
+            "status",
+            "posting_status",
+            "payment_status",
+            "exception_category",
+            "updated_at",
+            "created_at",
+        ],
+        "No invoices match the selected filters.",
+    )
+
+    if filtered_df.empty or "invoice_number" not in filtered_df.columns:
+        st.info("No invoices match the selected filters.")
+        return
+
+    invoice_options = filtered_df["invoice_number"].dropna().astype(str).unique().tolist()
+    if not invoice_options:
+        st.info("No invoices match the selected filters.")
+        return
+
+    selected_invoice = st.selectbox(
+        "Select invoice",
+        invoice_options,
+        key="agent_workbench_invoice_selector",
+    )
+    selected_rows = filtered_df[filtered_df["invoice_number"].astype(str) == selected_invoice]
+    if selected_rows.empty:
+        st.info("Selected invoice is not available after filtering.")
+        return
+    selected_invoice_row = selected_rows.iloc[0]
+
+    validation_df = load_ap_agent_validation_results(selected_invoice)
+    communication_df = load_ap_agent_communications(selected_invoice)
+    events_df = load_ap_agent_events(selected_invoice)
+    exception_df = load_exception_cases_for_invoice(selected_invoice)
+    posting_df = load_posting_attempts_for_invoice(selected_invoice)
+    ledger_df = load_consumption_ledger_for_invoice(selected_invoice)
+
+    st.subheader(f"Invoice Command Center — {selected_invoice}")
+    workflow_status = current_row_value(selected_invoice_row, ["status", "workflow_status", "agent_status"])
+    posting_status = current_row_value(selected_invoice_row, ["posting_status"])
+    payment_status = current_row_value(selected_invoice_row, ["payment_status"])
+    render_metric_cards(
+        [
+            {
+                "title": "Invoice number",
+                "value": current_row_value(selected_invoice_row, ["invoice_number"]),
+                "help_text": "",
+            },
+            {
+                "title": "Vendor",
+                "value": current_row_value(selected_invoice_row, ["vendor_name"]),
+                "help_text": "",
+            },
+            {
+                "title": "PO number",
+                "value": current_row_value(selected_invoice_row, ["po_number"]),
+                "help_text": "",
+            },
+            {
+                "title": "Amount",
+                "value": current_row_value(selected_invoice_row, ["total_amount", "document_total", "amount"]),
+                "help_text": "",
+            },
+            {
+                "title": "Workflow status",
+                "value": workflow_status,
+                "help_text": "Current AP Agent state",
+            },
+            {
+                "title": "Posting status",
+                "value": posting_status,
+                "help_text": "Posting outcome",
+            },
+            {
+                "title": "Payment status",
+                "value": payment_status,
+                "help_text": "Payment-run state",
+            },
+            {
+                "title": "Last updated",
+                "value": current_row_value(selected_invoice_row, ["updated_at"]),
+                "help_text": "",
+            },
+        ],
+        columns=4,
+    )
+    render_status_explanation(workflow_status, posting_status, payment_status)
+
+    st.subheader("Journey Tracker")
+    render_invoice_journey_tracker(
+        selected_invoice_row,
+        validation_df,
+        communication_df,
+        events_df,
+    )
+
+    tab_overview, tab_validation, tab_exceptions, tab_communication, tab_events, tab_posting, tab_technical = st.tabs(
+        [
+            "Overview",
+            "Validation Controls",
+            "Exceptions",
+            "Communication",
+            "Recheck / Events",
+            "Posting / Ledger",
+            "Technical Data",
+        ]
+    )
+
+    with tab_overview:
+        st.subheader("Invoice Overview")
+        business_dataframe(
+            selected_rows,
+            [
+                "invoice_number",
+                "vendor_name",
+                "po_number",
+                "total_amount",
+                "status",
+                "posting_status",
+                "payment_status",
+                "exception_category",
+                "updated_at",
+            ],
+            "Selected invoice details are unavailable.",
         )
-
-        if agent_df.empty:
-
-            st.info(
-                "No AP Agent invoice records available."
+        render_status_explanation(workflow_status, posting_status, payment_status)
+        extraction_values = [
+            current_row_value(selected_invoice_row, ["extraction_quality_status"], default=None),
+            current_row_value(selected_invoice_row, ["extraction_confidence"], default=None),
+            current_row_value(selected_invoice_row, ["extraction_retry_count"], default=None),
+            current_row_value(selected_invoice_row, ["extraction_review_reason"], default=None),
+        ]
+        if any(value is not None for value in extraction_values):
+            st.subheader("Extraction Quality")
+            render_metric_cards(
+                [
+                    {
+                        "title": "Quality status",
+                        "value": extraction_values[0] or "—",
+                        "help_text": "Extraction gate result",
+                    },
+                    {
+                        "title": "Confidence",
+                        "value": extraction_values[1] or "—",
+                        "help_text": "AI extraction confidence",
+                    },
+                    {
+                        "title": "Retry count",
+                        "value": extraction_values[2] or "—",
+                        "help_text": "Extraction retry attempts",
+                    },
+                    {
+                        "title": "Review reason",
+                        "value": extraction_values[3] or "—",
+                        "help_text": "Why review is needed",
+                    },
+                ],
+                columns=4,
             )
+        business_dataframe(
+            events_df.head(5) if events_df is not None and not events_df.empty else events_df,
+            ["created_at", "event_type", "agent_name", "message"],
+            "No workflow events found.",
+        )
 
+    with tab_validation:
+        if validation_df.empty:
+            st.info("No validation controls found yet for this invoice.")
         else:
+            passed_controls = 0
+            failed_blocking = 0
+            warning_controls = 0
+            for _, row in validation_df.iterrows():
+                severity = str(row.get("severity", "")).upper()
+                passed = str(row.get("passed")).lower() in {"true", "1", "yes"}
+                if severity in {"WARNING", "WARN"}:
+                    warning_controls += 1
+                elif passed:
+                    passed_controls += 1
+                else:
+                    failed_blocking += 1
+            render_metric_cards(
+                [
+                    {
+                        "title": "Total controls",
+                        "value": len(validation_df),
+                        "help_text": "All AP validation checks",
+                    },
+                    {
+                        "title": "Passed",
+                        "value": passed_controls,
+                        "help_text": "Controls that passed",
+                    },
+                    {
+                        "title": "Failed blocking",
+                        "value": failed_blocking,
+                        "help_text": "Blocking failures",
+                    },
+                    {
+                        "title": "Warnings",
+                        "value": warning_controls,
+                        "help_text": "Advisory controls",
+                    },
+                ],
+                columns=4,
+            )
+            validation_groups = [
+                ("PO", ["PO"]),
+                ("GRN", ["GRN"]),
+                ("Vendor", ["VENDOR"]),
+                ("Duplicate", ["DUP"]),
+                ("Financial", ["FIN", "AMOUNT", "PRICE", "TOTAL"]),
+                ("Tax", ["TAX", "VAT", "GST"]),
+                ("Payment Terms", ["PAYMENT", "TERMS"]),
+                ("Date", ["DATE"]),
+                ("Consumption", ["CONSUMPTION", "LEDGER", "CUMULATIVE"]),
+                ("Other", []),
+            ]
+            validation_tabs = st.tabs([group[0] for group in validation_groups])
+            assigned_indexes = set()
+            for tab, (group_name, tokens) in zip(validation_tabs, validation_groups):
+                with tab:
+                    if tokens:
+                        matching_indexes = []
+                        for index, row in validation_df.iterrows():
+                            haystack = " ".join(
+                                str(row.get(column, ""))
+                                for column in ["rule_code", "rule_name", "message"]
+                                if column in validation_df.columns
+                            ).upper()
+                            if any(token in haystack for token in tokens):
+                                matching_indexes.append(index)
+                                assigned_indexes.add(index)
+                        group_df = validation_df.loc[matching_indexes]
+                    else:
+                        group_df = validation_df.drop(index=list(assigned_indexes))
+                    business_dataframe(
+                        group_df,
+                        ["rule_code", "rule_name", "passed", "severity", "message", "created_at"],
+                        f"No {group_name.lower()} validation controls found.",
+                    )
 
-            agent_df.index = agent_df.index + 1
-            agent_df.index.name = "R.no"
-
-            st.dataframe(
-                agent_df,
-                use_container_width=True
+    with tab_exceptions:
+        if exception_df.empty:
+            st.info("No exception records found for this invoice.")
+        else:
+            open_count = 0
+            if "status" in exception_df.columns:
+                open_count = int((exception_df["status"].astype(str).str.upper() == "OPEN").sum())
+            owner = current_row_value(exception_df.iloc[0], ["owner"], default="—")
+            render_metric_cards(
+                [
+                    {
+                        "title": "Total exceptions",
+                        "value": len(exception_df),
+                        "help_text": "Exception case records",
+                    },
+                    {
+                        "title": "Open exceptions",
+                        "value": open_count,
+                        "help_text": "Still needs action",
+                    },
+                    {
+                        "title": "Resolved exceptions",
+                        "value": max(len(exception_df) - open_count, 0),
+                        "help_text": "Closed or resolved",
+                    },
+                    {
+                        "title": "Owner / team",
+                        "value": owner,
+                        "help_text": "Current owner",
+                    },
+                ],
+                columns=4,
+            )
+            business_dataframe(
+                exception_df,
+                ["category", "description", "status", "owner", "created_at", "updated_at"],
+                "No exception records found for this invoice.",
             )
 
-            st.divider()
+    with tab_communication:
+        if communication_df.empty:
+            st.info(
+                "No communication generated for this invoice. Clean invoices normally do not generate exception emails."
+            )
+        else:
+            latest = communication_df.iloc[0]
+            render_metric_cards(
+                [
+                    {
+                        "title": "Total messages",
+                        "value": len(communication_df),
+                        "help_text": "Communication records",
+                    },
+                    {
+                        "title": "Latest status",
+                        "value": current_row_value(latest, ["status"]),
+                        "help_text": "Most recent communication",
+                    },
+                    {
+                        "title": "Latest recipient",
+                        "value": current_row_value(latest, ["recipient"]),
+                        "help_text": "Recipient or team",
+                    },
+                    {
+                        "title": "Latest direction",
+                        "value": current_row_value(latest, ["direction"]),
+                        "help_text": "Inbound or outbound",
+                    },
+                ],
+                columns=4,
+            )
+            business_dataframe(
+                communication_df,
+                ["created_at", "direction", "recipient", "subject", "status", "smtp_message_id"],
+                "No communication generated for this invoice.",
+            )
+            if "body" in communication_df.columns:
+                for _, communication in communication_df.iterrows():
+                    subject = communication.get("subject", "Message")
+                    with st.expander(f"Message body — {subject}"):
+                        st.code(str(communication.get("body", "")), language="text")
 
-            st.subheader("Invoice Drilldown")
-
-            invoice_options = agent_df["invoice_number"].dropna().unique().tolist()
-
-            selected_invoice = st.selectbox(
-                "Select Invoice",
-                invoice_options
+    with tab_events:
+        if events_df.empty:
+            st.info("No workflow events found.")
+        else:
+            latest_event = events_df.iloc[0]
+            render_metric_cards(
+                [
+                    {
+                        "title": "Event count",
+                        "value": len(events_df),
+                        "help_text": "Workflow audit events",
+                    },
+                    {
+                        "title": "Latest event type",
+                        "value": current_row_value(latest_event, ["event_type"]),
+                        "help_text": "Most recent event",
+                    },
+                    {
+                        "title": "Latest event timestamp",
+                        "value": current_row_value(latest_event, ["created_at"]),
+                        "help_text": "Most recent update",
+                    },
+                    {
+                        "title": "Response received",
+                        "value": "Yes" if event_contains(events_df, ["RESPONSE", "EVIDENCE", "FIELD_UPDATED"]) else "No",
+                        "help_text": "Response/evidence captured",
+                    },
+                    {
+                        "title": "Recheck happened",
+                        "value": "Yes" if event_contains(events_df, ["RECHECK", "REPROCESS"]) else "No",
+                        "help_text": "Controlled recheck activity",
+                    },
+                ],
+                columns=3,
+            )
+            business_dataframe(
+                events_df,
+                ["created_at", "event_type", "agent_name", "message"],
+                "No workflow events found.",
             )
 
-            if selected_invoice:
+    with tab_posting:
+        sap_document_number = "—"
+        if not posting_df.empty:
+            sap_document_number = current_row_value(posting_df.iloc[0], ["sap_document_number"])
+        render_metric_cards(
+            [
+                {
+                    "title": "Posting status",
+                    "value": posting_status,
+                    "help_text": "Posting and payment are separate",
+                },
+                {
+                    "title": "Payment status",
+                    "value": payment_status,
+                    "help_text": "ERP/payment-run status",
+                },
+                {
+                    "title": "Posting attempts",
+                    "value": len(posting_df),
+                    "help_text": "Posting attempt records",
+                },
+                {
+                    "title": "SAP document number",
+                    "value": sap_document_number,
+                    "help_text": "Returned by posting flow when available",
+                },
+            ],
+            columns=4,
+        )
+        st.info("Posting and payment are separate. A posted invoice is not automatically paid.")
+        business_dataframe(
+            posting_df,
+            ["created_at", "status", "sap_document_number", "message", "attempt_number"],
+            "Posting attempt details are not available yet.",
+        )
+        business_dataframe(
+            ledger_df,
+            [
+                "po_number",
+                "gr_number",
+                "grn_number",
+                "invoice_number",
+                "line_no",
+                "consumed_qty",
+                "consumed_amount",
+                "remaining_qty",
+                "remaining_amount",
+                "created_at",
+            ],
+            "Consumption ledger details are not available yet.",
+        )
 
-                st.markdown(
-                    f"### Selected Invoice: `{selected_invoice}`"
-                )
-
-                selected_row = agent_df[
-                    agent_df["invoice_number"] == selected_invoice
-                ]
-
-                st.write(
-                    selected_row
-                )
-
-                st.subheader("Validation Results")
-
-                validation_df = load_ap_agent_validation_results(
-                    selected_invoice
-                )
-
-                if validation_df.empty:
-                    st.info("No validation results found.")
-                else:
-                    st.dataframe(
-                        validation_df,
-                        use_container_width=True
-                    )
-                st.subheader("Email / Communication")
-
-                communication_df = load_ap_agent_communications(
-                    selected_invoice
-                )
-
-                if communication_df.empty:
-
-                    st.info(
-                        "No email communication created for this invoice. "
-                        "Clean posted invoices normally do not generate emails."
-                    )
-
-                else:
-
-                    latest_email = communication_df.iloc[0]
-
-                    e1, e2, e3 = st.columns(3)
-
-                    with e1:
-                        st.metric(
-                            "Email Status",
-                            latest_email.get("status", "—")
-                        )
-
-                    with e2:
-                        st.metric(
-                            "Recipient",
-                            latest_email.get("recipient", "—")
-                        )
-
-                    with e3:
-                        st.metric(
-                            "Direction",
-                            latest_email.get("direction", "—")
-                        )
-
-                    st.dataframe(
-                        communication_df[
-                            [
-                                "created_at",
-                                "direction",
-                                "recipient",
-                                "subject",
-                                "status",
-                                "smtp_message_id",
-                            ]
-                        ],
-                        use_container_width=True,
-                    )
-
-                    st.markdown("### Email Message")
-
-                    for _, communication in communication_df.iterrows():
-
-                        st.markdown(
-                            f"**{communication.get('subject', '')}**"
-                        )
-
-                        st.caption(
-                            f"To: {communication.get('recipient', 'Not configured')} "
-                            f"· Status: {communication.get('status', '')} "
-                            f"· Created: {communication.get('created_at', '')}"
-                        )
-
-                        st.code(
-                            communication.get("body", ""),
-                            language="text",
-                        )
-
-                        st.divider()
-
-                
-                st.subheader("Workflow Events")
-
-                events_df = load_ap_agent_events(
-                    selected_invoice
-                )
-
-                if events_df.empty:
-                    st.info("No workflow events found.")
-                else:
-                    st.dataframe(
-                        events_df,
-                        use_container_width=True
-                    )
-    # ===================================
-    # MANUAL DATA ENTRY
-    # ===================================
+    with tab_technical:
+        render_technical_details("Selected invoice raw row", selected_invoice_row.to_dict())
+        render_technical_details(
+            "Validation raw data",
+            validation_df.to_dict(orient="records") if validation_df is not None else {},
+        )
+        render_technical_details(
+            "Exception raw data",
+            exception_df.to_dict(orient="records") if exception_df is not None else {},
+        )
+        render_technical_details(
+            "Communication raw data",
+            communication_df.to_dict(orient="records") if communication_df is not None else {},
+        )
+        render_technical_details(
+            "Events raw data",
+            events_df.to_dict(orient="records") if events_df is not None else {},
+        )
+        render_technical_details(
+            "Posting attempts raw data",
+            posting_df.to_dict(orient="records") if posting_df is not None else {},
+        )
+        render_technical_details(
+            "Consumption ledger raw data",
+            ledger_df.to_dict(orient="records") if ledger_df is not None else {},
+        )
 
 
 def render_response_recheck_demo():
