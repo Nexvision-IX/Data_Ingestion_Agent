@@ -414,6 +414,8 @@ AP_AGENT_BASE_URL = os.getenv(
     "AGENT_API_BASE_URL",
     os.getenv("AP_AGENT_BASE_URL", f"http://127.0.0.1:{AGENT_API_PORT}"),
 ).rstrip("/")
+EXCEPTION_RESPONSE_ENDPOINT_TEMPLATE = "/api/v1/exceptions/{exception_id}/responses"
+CONTROLLED_RECHECK_ENDPOINT_TEMPLATE = "/api/v1/invoices/{invoice_id}/recheck"
 
 
 def render_section_help(text):
@@ -583,6 +585,59 @@ def event_contains(events_df, tokens):
         if any(token in haystack for token in token_list):
             return True
     return False
+
+
+def is_blocking_failed_control(row):
+    severity = str(row.get("severity", "")).upper()
+    passed = str(row.get("passed", "")).lower()
+    is_failed = passed in {"false", "0", "no"}
+    if severity in {"WARNING", "WARN"}:
+        return False
+    if severity in {"ERROR", "BLOCKING", "HIGH"} and is_failed:
+        return True
+    return not severity and is_failed
+
+
+def failed_blocking_controls(validation_df):
+    if validation_df is None or getattr(validation_df, "empty", False):
+        return validation_df
+    return validation_df[validation_df.apply(is_blocking_failed_control, axis=1)]
+
+
+def build_mock_response_template(template_name, selected_invoice_row, validation_df):
+    invoice_number = current_row_value(selected_invoice_row, ["invoice_number"], "the invoice")
+    vendor_name = current_row_value(selected_invoice_row, ["vendor_name"], "the supplier")
+    po_number = current_row_value(selected_invoice_row, ["po_number"], "PO-1001")
+    if po_number == "—":
+        po_number = "PO-1001"
+    templates = {
+        "Supplier confirms GRN completed": (
+            f"GRN has now been completed for invoice {invoice_number}. "
+            f"Please recheck the receipt evidence against {po_number}."
+        ),
+        "Supplier provides corrected PO number": (
+            f"The correct purchase order for invoice {invoice_number} is {po_number}. "
+            f"Please update the invoice context and run the controlled recheck."
+        ),
+        "Procurement confirms PO reopened": (
+            f"Procurement confirms {po_number} has been reopened and is valid for "
+            f"invoice {invoice_number} from {vendor_name}."
+        ),
+        "Supplier confirms corrected tax/VAT amount": (
+            f"The corrected tax amount for invoice {invoice_number} has been confirmed. "
+            "Please use the attached evidence and recheck the tax control."
+        ),
+        "Supplier confirms payment terms": (
+            f"Payment terms for invoice {invoice_number} are confirmed as per the PO. "
+            "Please recheck the payment terms control."
+        ),
+        "General clarification": (
+            f"Clarification received for invoice {invoice_number}. "
+            "Please attach this response to the exception and run controlled recheck."
+        ),
+        "Custom response": "",
+    }
+    return templates.get(template_name, "")
 
 
 def render_stage_cards(stages):
@@ -758,6 +813,7 @@ def load_exception_cases_for_invoice(selected_invoice):
     return _load_agent_optional_dataframe(
         """
         SELECT
+            ec.id AS exception_id,
             ec.category,
             ec.classifier_rationale AS description,
             ec.status,
@@ -770,6 +826,21 @@ def load_exception_cases_for_invoice(selected_invoice):
         JOIN invoices i ON i.id = ec.invoice_id
         WHERE i.invoice_number = :invoice_number
         ORDER BY ec.created_at DESC, ec.id DESC
+        """,
+        {"invoice_number": selected_invoice},
+    )
+
+
+def load_agent_invoice_identity(selected_invoice):
+    return _load_agent_optional_dataframe(
+        """
+        SELECT
+            i.id AS invoice_id,
+            i.invoice_number
+        FROM invoices i
+        WHERE i.invoice_number = :invoice_number
+        ORDER BY i.created_at DESC, i.id DESC
+        LIMIT 1
         """,
         {"invoice_number": selected_invoice},
     )
@@ -871,6 +942,56 @@ def api_health(url):
         return "Unavailable"
     except requests.RequestException:
         return "Unavailable"
+
+
+def get_agent_api(path, params=None):
+    url = f"{AP_AGENT_BASE_URL}{path}"
+    try:
+        response = requests.get(url, params=params, timeout=60)
+        try:
+            data = response.json()
+        except ValueError:
+            data = {"raw_response": response.text}
+        return {
+            "ok": response.status_code < 400,
+            "status_code": response.status_code,
+            "data": data,
+            "error": None if response.status_code < 400 else data,
+            "url": url,
+        }
+    except requests.RequestException as exc:
+        return {
+            "ok": False,
+            "status_code": None,
+            "data": None,
+            "error": str(exc),
+            "url": url,
+        }
+
+
+def post_agent_api(path, payload=None, params=None):
+    url = f"{AP_AGENT_BASE_URL}{path}"
+    try:
+        response = requests.post(url, json=payload or {}, params=params, timeout=60)
+        try:
+            data = response.json()
+        except ValueError:
+            data = {"raw_response": response.text}
+        return {
+            "ok": response.status_code < 400,
+            "status_code": response.status_code,
+            "data": data,
+            "error": None if response.status_code < 400 else data,
+            "url": url,
+        }
+    except requests.RequestException as exc:
+        return {
+            "ok": False,
+            "status_code": None,
+            "data": None,
+            "error": str(exc),
+            "url": url,
+        }
 
 
 def render_technical_details(label, payload):
@@ -2095,23 +2216,459 @@ def render_ap_agent_workbench():
 
 
 def render_response_recheck_demo():
+    st.title("Response & Recheck Demo")
     render_section_help(
-        "Use this page to simulate supplier/procurement responses and show how controlled recheck works."
+        "Use this page to simulate how AP captures a supplier or procurement response, updates the exception context, and runs a controlled recheck before posting."
     )
     if not ap_agent_db_exists():
-        st.warning("AP Agent database not found yet. Run invoice processing first so agent_app/ap_agent.db is created.")
+        st.warning("AP Agent database not found yet. Process an invoice first from Invoice Journey.")
         return
+
     agent_df = load_ap_agent_invoices(limit=100)
-    if agent_df.empty:
-        st.info("No AP Agent invoice records available yet.")
+    if agent_df.empty or "invoice_number" not in agent_df.columns:
+        st.info("No AP Agent invoices found yet.")
         return
-    invoice_options = agent_df["invoice_number"].dropna().unique().tolist()
-    selected_invoice = st.selectbox("Select Invoice", invoice_options, key="response_recheck_invoice")
-    if selected_invoice:
-        st.markdown(f"### Selected Invoice: `{selected_invoice}`")
-        selected_row = agent_df[agent_df["invoice_number"] == selected_invoice]
-        st.dataframe(selected_row, use_container_width=True)
-        st.info("Full response capture and controlled recheck controls will be added in the next step. Use AP Agent Workbench for the current invoice drilldown.")
+
+    working_df = agent_df.copy()
+    if "agent_status" in working_df.columns and "status" not in working_df.columns:
+        working_df["status"] = working_df["agent_status"]
+
+    preferred_statuses = {
+        "EXCEPTION_IDENTIFIED",
+        "REPROCESS_REQUESTED",
+        "REPROCESS_FAILED",
+        "EXTRACTION_REVIEW_REQUIRED",
+        "POSTING_FAILED",
+    }
+    status_column = "status" if "status" in working_df.columns else "agent_status"
+    if status_column in working_df.columns:
+        preferred_df = working_df[
+            working_df[status_column].astype(str).str.upper().isin(preferred_statuses)
+        ]
+    else:
+        preferred_df = working_df.iloc[0:0]
+
+    if preferred_df.empty:
+        st.info(
+            "No exception or recheck-ready invoices were found. Showing all invoices so you can still inspect the response/recheck flow."
+        )
+        selector_df = working_df
+    else:
+        selector_df = preferred_df
+
+    invoice_options = selector_df["invoice_number"].dropna().astype(str).unique().tolist()
+    if not invoice_options:
+        st.info("No AP Agent invoices found yet.")
+        return
+
+    selected_invoice = st.selectbox(
+        "Select invoice for response/recheck demo",
+        invoice_options,
+        key="response_recheck_invoice",
+    )
+    selected_rows = working_df[working_df["invoice_number"].astype(str) == selected_invoice]
+    if selected_rows.empty:
+        st.info("Selected invoice is no longer available.")
+        return
+    selected_invoice_row = selected_rows.iloc[0]
+
+    validation_df = load_ap_agent_validation_results(selected_invoice)
+    communication_df = load_ap_agent_communications(selected_invoice)
+    events_df = load_ap_agent_events(selected_invoice)
+    exception_df = load_exception_cases_for_invoice(selected_invoice)
+    identity_df = load_agent_invoice_identity(selected_invoice)
+
+    blocking_df = failed_blocking_controls(validation_df)
+    exception_count = 0 if exception_df is None or exception_df.empty else len(exception_df)
+    communication_count = 0 if communication_df is None or communication_df.empty else len(communication_df)
+    event_count = 0 if events_df is None or events_df.empty else len(events_df)
+    failed_count = 0 if blocking_df is None or blocking_df.empty else len(blocking_df)
+
+    baseline_key = f"response_recheck_baseline_{selected_invoice}"
+    if baseline_key not in st.session_state:
+        st.session_state[baseline_key] = {
+            "workflow": current_row_value(selected_invoice_row, ["status", "workflow_status", "agent_status"]),
+            "posting": current_row_value(selected_invoice_row, ["posting_status"]),
+            "payment": current_row_value(selected_invoice_row, ["payment_status"]),
+            "failed_controls": failed_count,
+            "communications": communication_count,
+            "events": event_count,
+            "response_received": event_contains(events_df, ["RESPONSE", "EVIDENCE", "FIELD_UPDATED"]),
+            "recheck_happened": event_contains(events_df, ["RECHECK", "REPROCESS"]),
+        }
+
+    st.subheader("Selected Invoice")
+    business_dataframe(
+        selected_rows,
+        [
+            "invoice_number",
+            "vendor_name",
+            "po_number",
+            "total_amount",
+            "status",
+            "posting_status",
+            "payment_status",
+            "exception_category",
+            "updated_at",
+        ],
+        "Selected invoice details are unavailable.",
+    )
+
+    render_metric_cards(
+        [
+            {
+                "title": "Invoice number",
+                "value": current_row_value(selected_invoice_row, ["invoice_number"]),
+                "help_text": "",
+            },
+            {
+                "title": "Vendor",
+                "value": current_row_value(selected_invoice_row, ["vendor_name"]),
+                "help_text": "",
+            },
+            {
+                "title": "PO",
+                "value": current_row_value(selected_invoice_row, ["po_number"]),
+                "help_text": "",
+            },
+            {
+                "title": "Amount",
+                "value": current_row_value(selected_invoice_row, ["total_amount"]),
+                "help_text": current_row_value(selected_invoice_row, ["currency"], ""),
+            },
+            {
+                "title": "Workflow",
+                "value": current_row_value(selected_invoice_row, ["status", "workflow_status", "agent_status"]),
+                "help_text": "Current AP Agent state",
+            },
+            {
+                "title": "Posting",
+                "value": current_row_value(selected_invoice_row, ["posting_status"]),
+                "help_text": "Posting is separate from payment",
+            },
+            {
+                "title": "Payment",
+                "value": current_row_value(selected_invoice_row, ["payment_status"]),
+                "help_text": "Do not infer paid from posted",
+            },
+            {
+                "title": "Exceptions",
+                "value": exception_count,
+                "help_text": f"{failed_count} blocking control(s)",
+            },
+        ],
+        columns=4,
+    )
+
+    st.subheader("What Is Blocking This Invoice?")
+    business_dataframe(
+        blocking_df,
+        ["rule_code", "rule_name", "severity", "message"],
+        "No failed blocking controls are visible for this invoice.",
+    )
+
+    st.subheader("Current Communication")
+    if communication_df is None or communication_df.empty:
+        st.info("No communication has been drafted or received for this invoice yet.")
+    else:
+        latest_communication = communication_df.iloc[0]
+        render_metric_cards(
+            [
+                {
+                    "title": "Recipient",
+                    "value": current_row_value(latest_communication, ["recipient"]),
+                    "help_text": "",
+                },
+                {
+                    "title": "Subject",
+                    "value": current_row_value(latest_communication, ["subject"]),
+                    "help_text": "",
+                },
+                {
+                    "title": "Status",
+                    "value": current_row_value(latest_communication, ["status"]),
+                    "help_text": current_row_value(latest_communication, ["direction"], ""),
+                },
+                {
+                    "title": "Created",
+                    "value": current_row_value(latest_communication, ["created_at"]),
+                    "help_text": "",
+                },
+            ],
+            columns=4,
+        )
+        with st.expander("Communication body"):
+            st.code(str(latest_communication.get("body", "")), language="text")
+
+    if exception_df is not None and not exception_df.empty:
+        if "status" in exception_df.columns:
+            open_exceptions = exception_df[
+                exception_df["status"].astype(str).str.upper().isin({"OPEN", "ACTIVE"})
+            ]
+        else:
+            open_exceptions = exception_df.iloc[0:0]
+        active_exception = open_exceptions.iloc[0] if not open_exceptions.empty else exception_df.iloc[0]
+    else:
+        active_exception = None
+    exception_id = None
+    if active_exception is not None:
+        exception_id = current_row_value(active_exception, ["exception_id"], default=None)
+
+    invoice_id = None
+    if identity_df is not None and not identity_df.empty:
+        invoice_id = current_row_value(identity_df.iloc[0], ["invoice_id"], default=None)
+
+    st.subheader("Mock Response Input")
+    response_templates = [
+        "Supplier confirms GRN completed",
+        "Supplier provides corrected PO number",
+        "Procurement confirms PO reopened",
+        "Supplier confirms corrected tax/VAT amount",
+        "Supplier confirms payment terms",
+        "General clarification",
+        "Custom response",
+    ]
+    template_name = st.selectbox(
+        "Response template",
+        response_templates,
+        key="response_recheck_template",
+    )
+    template_text = build_mock_response_template(
+        template_name,
+        selected_invoice_row,
+        validation_df,
+    )
+
+    with st.form("response_recheck_form"):
+        response_text = st.text_area(
+            "Mock supplier/procurement response",
+            value=template_text,
+            height=140,
+            key=f"response_recheck_text_{selected_invoice}",
+        )
+        col1, col2 = st.columns(2)
+        with col1:
+            responder_name = st.text_input(
+                "Responder name",
+                value="Demo Procurement User",
+                key=f"response_recheck_responder_name_{selected_invoice}",
+            )
+            response_source = st.text_input(
+                "Response source",
+                value="demo_ui",
+                key=f"response_recheck_source_{selected_invoice}",
+            )
+        with col2:
+            responder_email = st.text_input(
+                "Responder email",
+                value="procurement.demo@example.com",
+                key=f"response_recheck_responder_email_{selected_invoice}",
+            )
+            evidence_reference = st.text_input(
+                "Evidence reference",
+                value="Demo response captured in Streamlit",
+                key=f"response_recheck_evidence_{selected_invoice}",
+            )
+        submit_response = st.form_submit_button("Submit Response")
+
+    if submit_response:
+        if not exception_id:
+            st.warning(
+                "Response intake needs an exception on this invoice. Select an invoice with an exception, or create communication first from the AP Agent Workbench."
+            )
+        elif not response_text.strip():
+            st.warning("Enter a response before submitting.")
+        else:
+            source_lookup = {
+                "demo_ui": "MANUAL_TEST",
+                "supplier": "VENDOR",
+                "vendor": "VENDOR",
+                "procurement": "PROCUREMENT",
+                "ap": "AP",
+                "master_data": "MASTER_DATA",
+                "erp": "ERP",
+            }
+            api_source = source_lookup.get(
+                str(response_source or "").strip().lower(),
+                str(response_source or "MANUAL_TEST").strip().upper(),
+            )
+            payload = {
+                "exception_id": exception_id,
+                "source": api_source,
+                "response_text": response_text.strip(),
+                "provided_by": responder_name or responder_email or "Demo UI",
+                "values": {
+                    "invoice_number": selected_invoice,
+                    "responder_name": responder_name,
+                    "responder_email": responder_email,
+                    "response_source": response_source,
+                    "evidence_reference": evidence_reference,
+                },
+                "resume_recheck": False,
+            }
+            result = post_agent_api(
+                EXCEPTION_RESPONSE_ENDPOINT_TEMPLATE.format(exception_id=exception_id),
+                payload=payload,
+            )
+            st.session_state["last_response_submit_result"] = result
+            st.session_state["last_response_text"] = response_text.strip()
+            if result.get("ok"):
+                st.success("Response was recorded by the AP Agent.")
+            else:
+                st.error("Response intake failed. See technical details below.")
+
+    st.subheader("Controlled Recheck")
+    st.info(
+        "Controlled recheck should run only after a response or evidence has been captured. It should not blindly reprocess every invoice."
+    )
+    col_recheck, col_refresh = st.columns(2)
+    with col_recheck:
+        if st.button("Run Controlled Recheck", key="response_recheck_run"):
+            if not invoice_id:
+                st.warning("Controlled recheck needs the AP Agent invoice ID, but it was not found for this invoice.")
+            else:
+                payload = {
+                    "latest_message": st.session_state.get("last_response_text"),
+                    "simulate_resolution": False,
+                }
+                result = post_agent_api(
+                    CONTROLLED_RECHECK_ENDPOINT_TEMPLATE.format(invoice_id=invoice_id),
+                    payload=payload,
+                )
+                st.session_state["last_recheck_result"] = result
+                if result.get("ok"):
+                    st.success("Controlled recheck completed.")
+                else:
+                    st.error("Controlled recheck failed. See technical details below.")
+    with col_refresh:
+        if st.button("Refresh Invoice State", key="response_recheck_refresh"):
+            st.rerun()
+
+    agent_df = load_ap_agent_invoices(limit=100)
+    working_df = agent_df.copy()
+    if "agent_status" in working_df.columns and "status" not in working_df.columns:
+        working_df["status"] = working_df["agent_status"]
+    refreshed_rows = working_df[working_df["invoice_number"].astype(str) == selected_invoice]
+    if not refreshed_rows.empty:
+        selected_invoice_row = refreshed_rows.iloc[0]
+    validation_df = load_ap_agent_validation_results(selected_invoice)
+    communication_df = load_ap_agent_communications(selected_invoice)
+    events_df = load_ap_agent_events(selected_invoice)
+    exception_df = load_exception_cases_for_invoice(selected_invoice)
+    blocking_df = failed_blocking_controls(validation_df)
+
+    baseline = st.session_state.get(baseline_key, {})
+    after_failed_count = 0 if blocking_df is None or blocking_df.empty else len(blocking_df)
+    after_communication_count = 0 if communication_df is None or communication_df.empty else len(communication_df)
+    after_event_count = 0 if events_df is None or events_df.empty else len(events_df)
+    response_received = event_contains(events_df, ["RESPONSE", "EVIDENCE", "FIELD_UPDATED"])
+    recheck_happened = event_contains(events_df, ["RECHECK", "REPROCESS"])
+
+    st.subheader("Before/After Demo Evidence")
+    render_metric_cards(
+        [
+            {
+                "title": "Workflow",
+                "value": f"{baseline.get('workflow', '—')} → {current_row_value(selected_invoice_row, ['status', 'workflow_status', 'agent_status'])}",
+                "help_text": "Before and current status",
+            },
+            {
+                "title": "Posting",
+                "value": f"{baseline.get('posting', '—')} → {current_row_value(selected_invoice_row, ['posting_status'])}",
+                "help_text": "Posting status",
+            },
+            {
+                "title": "Payment",
+                "value": f"{baseline.get('payment', '—')} → {current_row_value(selected_invoice_row, ['payment_status'])}",
+                "help_text": "Payment remains separate",
+            },
+            {
+                "title": "Failed controls",
+                "value": f"{baseline.get('failed_controls', 0)} → {after_failed_count}",
+                "help_text": "Blocking validation controls",
+            },
+            {
+                "title": "Communications",
+                "value": f"{baseline.get('communications', 0)} → {after_communication_count}",
+                "help_text": "Outbound and inbound messages",
+            },
+            {
+                "title": "Audit events",
+                "value": f"{baseline.get('events', 0)} → {after_event_count}",
+                "help_text": "Workflow evidence",
+            },
+            {
+                "title": "Response received",
+                "value": "Yes" if response_received else "No",
+                "help_text": "Response/evidence event found",
+            },
+            {
+                "title": "Recheck happened",
+                "value": "Yes" if recheck_happened else "No",
+                "help_text": "Recheck/reprocess event found",
+            },
+        ],
+        columns=4,
+    )
+
+    st.subheader("Recheck Timeline")
+    business_dataframe(
+        events_df.head(10) if events_df is not None and not events_df.empty else events_df,
+        ["created_at", "event_type", "agent_name", "message"],
+        "No workflow events found for this invoice.",
+    )
+    if events_df is not None and not events_df.empty:
+        event_text = events_df.fillna("").astype(str).apply(
+            lambda row: " ".join(row.values).upper(),
+            axis=1,
+        )
+        related_events = events_df[
+            event_text.str.contains("RESPONSE|EVIDENCE|FIELD_UPDATED|RECHECK|REPROCESS", regex=True)
+        ]
+    else:
+        related_events = events_df
+    business_dataframe(
+        related_events,
+        ["created_at", "event_type", "agent_name", "message"],
+        "No response or recheck-specific events found yet.",
+    )
+
+    st.subheader("Posting and Payment")
+    render_status_explanation(
+        current_row_value(selected_invoice_row, ["status", "workflow_status", "agent_status"]),
+        current_row_value(selected_invoice_row, ["posting_status"]),
+        current_row_value(selected_invoice_row, ["payment_status"]),
+    )
+    st.info(
+        "Posting confirms accounting handoff. Payment is a separate ERP/payment-run lifecycle and should not be marked paid by this demo action."
+    )
+
+    st.subheader("Technical Details")
+    render_technical_details("Selected invoice raw row", selected_invoice_row.to_dict())
+    render_technical_details(
+        "Validation raw data",
+        validation_df.to_dict(orient="records") if validation_df is not None else {},
+    )
+    render_technical_details(
+        "Communication raw data",
+        communication_df.to_dict(orient="records") if communication_df is not None else {},
+    )
+    render_technical_details(
+        "Events raw data",
+        events_df.to_dict(orient="records") if events_df is not None else {},
+    )
+    render_technical_details(
+        "Exception raw data",
+        exception_df.to_dict(orient="records") if exception_df is not None else {},
+    )
+    render_technical_details(
+        "Last response submit result",
+        st.session_state.get("last_response_submit_result", {}),
+    )
+    render_technical_details(
+        "Last recheck result",
+        st.session_state.get("last_recheck_result", {}),
+    )
 
 def render_reference_data_test_setup():
     render_section_help(
