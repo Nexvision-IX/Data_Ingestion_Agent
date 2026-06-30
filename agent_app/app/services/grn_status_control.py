@@ -30,12 +30,39 @@ def normalize_grn(grn: dict[str, Any]) -> dict[str, Any]:
 class GRNStatusControl:
     def evaluate(self, grns: list[dict[str, Any]]) -> RuleResult:
         normalized_grns = [normalize_grn(grn) for grn in grns]
+        if not normalized_grns:
+            return RuleResult(
+                rule_code="GRN-001",
+                rule_name="GRN status is valid for invoicing",
+                passed=True,
+                severity="ERROR",
+                message="Skipped because no GRN exists.",
+                details={
+                    "allowed_statuses": sorted(VALID_GRN_STATUSES),
+                    "grns": [],
+                    "invalid_grns": [],
+                    "grn_count": 0,
+                    "skipped": True,
+                    "skip_reason": "NO_GRN_EXISTS",
+                },
+            )
+
         invalid_grns = [
             self._detail(grn)
             for grn in normalized_grns
             if grn["status"] not in VALID_GRN_STATUSES
         ]
-        passed = bool(normalized_grns) and not invalid_grns
+        passed = not invalid_grns
+        invalid_statuses = sorted(
+            {
+                str(
+                    grn.get("raw_status")
+                    or grn.get("normalized_status")
+                    or "UNKNOWN"
+                )
+                for grn in invalid_grns
+            }
+        )
 
         return RuleResult(
             rule_code="GRN-001",
@@ -47,7 +74,8 @@ class GRNStatusControl:
                 if passed
                 else (
                     "One or more GRNs have a status that is not valid "
-                    "for invoice posting."
+                    "for invoice posting: "
+                    f"{', '.join(invalid_statuses)}."
                 )
             ),
             details={

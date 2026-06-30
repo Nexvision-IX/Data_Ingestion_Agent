@@ -833,6 +833,7 @@ class APOrchestrator:
         invoice: Invoice,
         sap_document_number: str | None,
         posting_message: str | None,
+        context: dict | None = None,
     ) -> dict:
         raw_payload = invoice.extraction_raw or {}
 
@@ -887,6 +888,10 @@ class APOrchestrator:
                 }
             )
 
+        context = context or {}
+        po = context.get("po") or {}
+        payment_terms = invoice.payment_terms or po.get("payment_terms")
+
         return {
             "document_type": "posted_invoice",
             "invoice_number": invoice.invoice_number,
@@ -899,6 +904,7 @@ class APOrchestrator:
             "vat_percent": vat_percent,
             "document_total": invoice.total_amount,
             "amount": invoice.total_amount,
+            "payment_terms": payment_terms,
             "payment_status": (
                 invoice.payment_status or InvoicePaymentStatus.UNKNOWN
             ),
@@ -984,11 +990,13 @@ class APOrchestrator:
         invoice: Invoice,
         sap_document_number: str | None,
         posting_message: str | None,
+        context: dict | None = None,
     ) -> None:
         payload = self._posted_invoice_payload(
             invoice,
             sap_document_number,
             posting_message,
+            context,
         )
 
         self._publish_posted_invoice_to_master(
@@ -1171,6 +1179,7 @@ class APOrchestrator:
                 invoice,
                 result.get("sap_document_number"),
                 result.get("message"),
+                live_check.get("context") or context,
             )
         else:
             POGRNConsumptionLedgerService(self.db).release(

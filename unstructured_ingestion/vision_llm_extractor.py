@@ -155,6 +155,21 @@ def normalize_payment_terms(value: Any) -> str:
     return safe_text(value)
 
 
+def clean_vendor_name(value: Any) -> str:
+    vendor_name = safe_text(value)
+    if not vendor_name:
+        return ""
+
+    return re.sub(
+        r"^\s*(?:supplier\s+name|vendor\s+name|supplier|vendor)"
+        r"\s*[:\-]?\s+",
+        "",
+        vendor_name,
+        count=1,
+        flags=re.IGNORECASE,
+    ).strip()
+
+
 def extract_payment_terms_from_text(text: str) -> str:
     normalized = normalize_ocr_text(text).upper()
     patterns = (
@@ -306,7 +321,7 @@ def normalize_invoice_schema(
         "source_system": "OCR_GROQ",
         "invoice_number": safe_text(data.get("invoice_number")),
         "po_number": safe_text(data.get("po_number")),
-        "vendor_name": safe_text(data.get("vendor_name")),
+        "vendor_name": clean_vendor_name(data.get("vendor_name")),
         "vendor_number": safe_text(data.get("vendor_number")),
         "invoice_date": normalize_date(data.get("invoice_date")),
         "due_date": normalize_date(data.get("due_date")),

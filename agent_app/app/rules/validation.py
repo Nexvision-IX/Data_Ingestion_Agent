@@ -35,6 +35,7 @@ class APValidationEngine:
         po = normalize_po(context.get("po"))
         from app.services.vendor_master_control import (
             VendorMasterControl,
+            normalize_vendor_identity,
             normalize_vendor,
         )
 
@@ -110,11 +111,35 @@ class APValidationEngine:
             )
         )
 
-        vendor_match = (
-            bool(po)
-            and po.get("vendor_number")
-            == invoice.vendor_number
+        normalized_invoice_vendor_number = normalize_vendor_identity(
+            invoice.vendor_number
         )
+        normalized_po_vendor_number = normalize_vendor_identity(
+            po.get("vendor_number") if po else None
+        )
+        normalized_invoice_vendor_name = normalize_vendor_identity(
+            invoice.vendor_name
+        )
+        normalized_po_vendor_name = normalize_vendor_identity(
+            po.get("vendor_name") if po else None
+        )
+        if (
+            bool(normalized_invoice_vendor_number)
+            and bool(normalized_po_vendor_number)
+        ):
+            vendor_match = (
+                bool(po)
+                and normalized_invoice_vendor_number
+                == normalized_po_vendor_number
+            )
+        else:
+            vendor_match = (
+                bool(po)
+                and bool(normalized_invoice_vendor_name)
+                and bool(normalized_po_vendor_name)
+                and normalized_invoice_vendor_name
+                == normalized_po_vendor_name
+            )
         results.append(
             RuleResult(
                 "AP-004",
@@ -132,6 +157,24 @@ class APValidationEngine:
                         po.get("vendor_number")
                         if po
                         else None
+                    ),
+                    "invoice_vendor_name": invoice.vendor_name,
+                    "po_vendor_name": (
+                        po.get("vendor_name")
+                        if po
+                        else None
+                    ),
+                    "normalized_invoice_vendor_number": (
+                        normalized_invoice_vendor_number
+                    ),
+                    "normalized_po_vendor_number": (
+                        normalized_po_vendor_number
+                    ),
+                    "normalized_invoice_vendor_name": (
+                        normalized_invoice_vendor_name
+                    ),
+                    "normalized_po_vendor_name": (
+                        normalized_po_vendor_name
                     ),
                 },
             )
@@ -185,18 +228,22 @@ class APValidationEngine:
                 line.po_item
                 or f"{line.line_number:05d}"
             )
-            matching_grns = [
+            matching_grn_rows = [
                 item
                 for item in grns
                 if item.get("po_item") == item_key
-                and item.get("status") in VALID_GRN_STATUSES
+            ]
+            matching_valid_grns = [
+                item
+                for item in matching_grn_rows
+                if item.get("status") in VALID_GRN_STATUSES
             ]
             received_quantity = sum(
                 float(item.get("received_quantity", 0))
-                for item in matching_grns
+                for item in matching_valid_grns
             )
 
-            if not matching_grns:
+            if not matching_grn_rows:
                 grn_failures.append(item_key)
 
             if received_quantity < line.quantity:
@@ -254,7 +301,7 @@ class APValidationEngine:
                 not grn_failures,
                 "ERROR",
                 (
-                    "Valid posted or partial GRN found for every line."
+                    "GRN row found for every invoice line."
                     if not grn_failures
                     else (
                         "Missing valid GRN for items: "

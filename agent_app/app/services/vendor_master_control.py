@@ -12,6 +12,15 @@ from app.services.status_catalog_service import (
 
 
 _NON_ALPHANUMERIC = re.compile(r"[^A-Z0-9]+")
+_COMPANY_SUFFIX_ALIASES = {
+    "LIMITED": "LTD",
+}
+_LEADING_LABELS = (
+    ("SUPPLIER", "NAME"),
+    ("VENDOR", "NAME"),
+    ("SUPPLIER",),
+    ("VENDOR",),
+)
 
 _TAX_FIELDS = ("tax_id", "tax_number", "gstin", "vat_number")
 _PAYMENT_FIELDS = (
@@ -23,7 +32,25 @@ _PAYMENT_FIELDS = (
 
 
 def normalize_vendor_identity(value: Any) -> str:
-    return _NON_ALPHANUMERIC.sub("", str(value or "").upper())
+    raw = str(value or "").strip().upper()
+    if not raw:
+        return ""
+
+    tokens = [
+        token
+        for token in _NON_ALPHANUMERIC.sub(" ", raw).split()
+        if token
+    ]
+    for label in _LEADING_LABELS:
+        if tuple(tokens[:len(label)]) == label:
+            tokens = tokens[len(label):]
+            break
+
+    normalized_tokens = [
+        _COMPANY_SUFFIX_ALIASES.get(token, token)
+        for token in tokens
+    ]
+    return "".join(normalized_tokens)
 
 
 def normalize_vendor(

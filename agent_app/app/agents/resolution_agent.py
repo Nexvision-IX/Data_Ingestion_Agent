@@ -10,6 +10,9 @@ RESOLUTION_MAP = {
     "PO_MISSING": (
         "Ask Procurement to provide or create the correct purchase order."
     ),
+    "PO_NOT_FOUND": (
+        "Ask Procurement to provide or create the correct purchase order."
+    ),
     "PO_STATUS_INVALID": (
         "Ask Procurement or AP to confirm whether the PO should be "
         "reopened, corrected, released, or replaced before invoice posting."
@@ -44,7 +47,19 @@ RESOLUTION_MAP = {
         "Ask the requester to confirm receipt quantity and post or "
         "correct the GRN."
     ),
+    "QUANTITY_NOT_COVERED_BY_GRN": (
+        "Ask the requester to confirm receipt quantity and post or "
+        "correct the GRN."
+    ),
     "PRICE_MISMATCH": (
+        "Ask Procurement to correct the PO price or obtain an approved "
+        "price variance."
+    ),
+    "AMOUNT_MISMATCH": (
+        "Ask Procurement to correct the PO price or obtain an approved "
+        "price variance."
+    ),
+    "PRICE_AMOUNT_MISMATCH": (
         "Ask Procurement to correct the PO price or obtain an approved "
         "price variance."
     ),
@@ -57,6 +72,10 @@ RESOLUTION_MAP = {
         "subtotal, tax, and document total."
     ),
     "PO_GRN_CONSUMPTION_EXCEEDED": (
+        "Ask AP, Procurement, and Receiving to verify prior invoices, "
+        "remaining PO balance, and GRN consumption before posting."
+    ),
+    "GRN_CONSUMPTION_EXCEEDED": (
         "Ask AP, Procurement, and Receiving to verify prior invoices, "
         "remaining PO balance, and GRN consumption before posting."
     ),

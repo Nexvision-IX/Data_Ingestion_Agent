@@ -15,6 +15,8 @@ sys.path.insert(0, str(AGENT_ROOT))
 os.environ.setdefault("APP_ENV", "test")
 
 from app.models import Invoice, InvoiceLine
+from app.agents.classification_agent import ClassificationAgent
+from app.integrations.llm.mock import MockLLMClient
 from app.rules.validation import APValidationEngine
 
 
@@ -30,7 +32,7 @@ def main() -> int:
     for status in (
         "Pending",
         "Draft",
-        "Open"
+        "Open",
         "Cancelled",
         "Canceled",
         "Reversed",
@@ -42,9 +44,28 @@ def main() -> int:
         _assert_status_fails(status)
 
     missing_results = _validate_without_grn()
-    assert missing_results["GRN-001"].passed is False
+    assert missing_results["GRN-001"].passed is True
+    assert missing_results["GRN-001"].message == (
+        "Skipped because no GRN exists."
+    )
     assert missing_results["AP-006"].passed is False
     assert missing_results["AP-007"].passed is False
+    category = _primary_category(missing_results)
+    assert category == "GRN_MISSING", category
+
+    invalid_results = _validate("Open", received_quantity=10)
+    assert invalid_results["GRN-001"].passed is False
+    assert "Open" in invalid_results["GRN-001"].message
+    category = _primary_category(invalid_results)
+    assert category == "GRN_STATUS_INVALID", category
+
+    valid_results = _validate("Posted", received_quantity=10)
+    assert valid_results["GRN-001"].passed is True
+
+    vendor_results = _validate_vendor_mismatch()
+    assert vendor_results["AP-004"].passed is False
+    category = _primary_category(vendor_results)
+    assert category == "VENDOR_MISMATCH", category
 
     print("[SUCCESS] GRN status validation tests passed.")
     return 0
@@ -60,7 +81,7 @@ def _assert_status_passes(status) -> None:
 def _assert_status_fails(status) -> None:
     results = _validate(status, received_quantity=10)
     assert results["GRN-001"].passed is False, status
-    assert results["AP-006"].passed is False, status
+    assert results["AP-006"].passed is True, status
     assert results["AP-007"].passed is False, status
 
 
@@ -72,6 +93,7 @@ def _validate(status, received_quantity: float):
             "vendor_number": invoice.vendor_number,
             "currency": invoice.currency,
             "payment_terms": invoice.payment_terms,
+            "status": "Open",
             "items": [
                 {
                     "po_item": "00001",
@@ -108,6 +130,7 @@ def _validate_without_grn():
             "vendor_number": invoice.vendor_number,
             "currency": invoice.currency,
             "payment_terms": invoice.payment_terms,
+            "status": "Open",
             "items": [
                 {
                     "po_item": "00001",
@@ -126,6 +149,63 @@ def _validate_without_grn():
         result.rule_code: result
         for result in APValidationEngine().validate(invoice, context)
     }
+
+
+def _validate_vendor_mismatch():
+    invoice = _invoice()
+    invoice.invoice_number = "INV-VENDOR-MISMATCH-001"
+    invoice.po_number = "PO-VENDOR-001"
+    invoice.vendor_name = "Wrong Vendor Ltd"
+    invoice.vendor_number = "WRONG_VENDOR_LTD"
+    context = {
+        "po": {
+            "po_number": invoice.po_number,
+            "vendor_name": "Correct Vendor Ltd",
+            "vendor_number": "CORRECT_VENDOR_LTD",
+            "currency": invoice.currency,
+            "payment_terms": invoice.payment_terms,
+            "status": "Open",
+            "items": [
+                {
+                    "po_item": "00001",
+                    "unit_price": 10,
+                }
+            ],
+        },
+        "vendor": {
+            "vendor_name": "Correct Vendor Ltd",
+            "vendor_number": "CORRECT_VENDOR_LTD",
+            "status": "ACTIVE",
+        },
+        "grns": [
+            {
+                "grn_number": "GRN-VENDOR-001",
+                "po_number": invoice.po_number,
+                "po_item": "00001",
+                "received_quantity": 10,
+                "status": "Posted",
+            }
+        ],
+        "invoice_history": [],
+    }
+    return {
+        result.rule_code: result
+        for result in APValidationEngine().validate(invoice, context)
+    }
+
+
+def _primary_category(results: dict):
+    failures = [
+        result.to_dict()
+        for result in results.values()
+        if result.severity == "ERROR"
+        and not result.passed
+    ]
+    classification = ClassificationAgent(MockLLMClient()).classify(
+        {"invoice_number": "TEST"},
+        failures,
+    )
+    return classification.category
 
 
 def _invoice() -> Invoice:

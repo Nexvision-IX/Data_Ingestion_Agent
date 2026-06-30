@@ -488,12 +488,22 @@ def safe_table_count(table_name):
         return 0
 
 
-def safe_load_table(table_name, limit=10):
+def safe_load_table(table_name, limit=30):
     try:
-        return load_table_data(table_name, limit=limit)
+        effective_limit = safe_table_count(table_name) if limit is None else limit
+        return load_table_data(table_name, limit=effective_limit)
     except Exception as exc:
         st.error(f"{table_name} table error: {exc}")
         return None
+
+
+def render_full_master_table(table_name, empty_message):
+    row_count = safe_table_count(table_name)
+    st.caption(f"Showing all {row_count} row{'s' if row_count != 1 else ''}.")
+    safe_dataframe(
+        safe_load_table(table_name, limit=None),
+        empty_message,
+    )
 
 
 def normalize_status_label(status):
@@ -1303,17 +1313,16 @@ def render_dashboard_control_tower():
         ]
     )
     with tabs[0]:
-        invoice_df = safe_load_table("invoice_master", limit=10)
-        safe_dataframe(invoice_df, "No invoice records found.")
+        render_full_master_table("invoice_master", "No invoice records found.")
     with tabs[1]:
-        po_df = safe_load_table("sap_po_master", limit=10)
-        safe_dataframe(po_df, "No purchase order records found.")
+        render_full_master_table("sap_po_master", "No purchase order records found.")
     with tabs[2]:
-        grn_df = safe_load_table("sap_grn_master", limit=10)
-        safe_dataframe(grn_df, "No GRN records found.")
+        render_full_master_table("sap_grn_master", "No GRN records found.")
     with tabs[3]:
-        posted_invoice_df = safe_load_table("sap_posted_invoice_master", limit=10)
-        safe_dataframe(posted_invoice_df, "No posted invoice references found.")
+        render_full_master_table(
+            "sap_posted_invoice_master",
+            "No posted invoice references found.",
+        )
 
     st.subheader("How to Use This Dashboard")
     st.info(
@@ -3183,23 +3192,14 @@ def render_reference_data_test_setup():
             ]
         )
         with table_tabs[0]:
-            safe_dataframe(
-                safe_load_table("invoice_master", limit=20),
-                "No master invoices found.",
-            )
+            render_full_master_table("invoice_master", "No master invoices found.")
         with table_tabs[1]:
-            safe_dataframe(
-                safe_load_table("sap_po_master", limit=20),
-                "No master PO records found.",
-            )
+            render_full_master_table("sap_po_master", "No master PO records found.")
         with table_tabs[2]:
-            safe_dataframe(
-                safe_load_table("sap_grn_master", limit=20),
-                "No master GRN records found.",
-            )
+            render_full_master_table("sap_grn_master", "No master GRN records found.")
         with table_tabs[3]:
-            safe_dataframe(
-                safe_load_table("sap_posted_invoice_master", limit=20),
+            render_full_master_table(
+                "sap_posted_invoice_master",
                 "No posted invoice references found.",
             )
 
