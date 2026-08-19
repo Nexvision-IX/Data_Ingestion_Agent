@@ -2185,48 +2185,70 @@ if selected_module == "Dashboard":
             st.metric("Posted Invoices", 0)
     st.info("System ready for processing.")
 
-    st.subheader("Recent Invoices")
+    st.subheader("All Invoices")
     try:
         invoice_df = populate_display_due_dates(
-            load_table_data("invoice_master", limit=10)
+            load_table_data(
+                "invoice_master",
+                limit=get_table_count("invoice_master"),
+            )
         )
         invoice_df.index=(invoice_df.index+1)
         invoice_df.index.name="R.no"
-        st.dataframe(invoice_df, use_container_width=True)
+        st.dataframe(
+            invoice_df,
+            use_container_width=True,
+            height=400,
+        )
     except Exception as e:
         st.error(f"Invoice table error: {e}")
 
-    st.subheader("Recent Purchase Orders")
+    st.subheader("All Purchase Orders")
     try:
-        po_df=load_table_data("sap_po_master", limit=10)
+        po_df=load_table_data(
+            "sap_po_master",
+            limit=get_table_count("sap_po_master"),
+        )
         po_df.index=(po_df.index+1)
         po_df.index.name="R.no"
-        st.dataframe(po_df, use_container_width=True)
+        st.dataframe(
+            po_df,
+            use_container_width=True,
+            height=400,
+        )
     except Exception as e:
         st.error(f"PO table error: {e}")
 
-    st.subheader("Recent GRNs")
+    st.subheader("All GRNs")
     try:
-        grn_df=load_table_data("sap_grn_master", limit=10)
+        grn_df=load_table_data(
+            "sap_grn_master",
+            limit=get_table_count("sap_grn_master"),
+        )
         grn_df.index=(grn_df.index+1)
         grn_df.index.name="R.no"
-        st.dataframe(grn_df, use_container_width=True)
+        st.dataframe(
+            grn_df,
+            use_container_width=True,
+            height=400,
+        )
     except Exception as e:
         st.error(f"GRN table error: {e}")
 
-    st.subheader("Recent Posted Invoices")
+    st.subheader("All Posted Invoices")
     try:
         posted_invoice_df = populate_display_due_dates(
             load_table_data(
                 "sap_posted_invoice_master",
-                limit=10,
+                limit=get_table_count("sap_posted_invoice_master"),
             )
         )
         posted_invoice_df.index = posted_invoice_df.index + 1
         posted_invoice_df.index.name = "R.no"
         st.dataframe(
             posted_invoice_df,
-            use_container_width=True
+            use_container_width=True,
+            height=400,
         )
     except Exception as e:
         st.error(f"Posted invoice table error: {e}")
