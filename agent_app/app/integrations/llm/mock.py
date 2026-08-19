@@ -23,7 +23,7 @@ RULE_TO_CATEGORY = {
             "OCR-009",
         )
     },
-    "AP-001": ("PO_NOT_FOUND", "HIGH", "PROCUREMENT"),
+    "AP-001": ("PO_MISSING", "HIGH", "PROCUREMENT"),
     "PO-001": ("PO_STATUS_INVALID", "HIGH", "PROCUREMENT"),
     "AP-002": ("VENDOR_NOT_FOUND", "HIGH", "VENDOR_MASTER"),
     "AP-003": ("BLOCKED_VENDOR", "CRITICAL", "VENDOR_MASTER"),
@@ -56,8 +56,8 @@ RULE_TO_CATEGORY = {
     "CONS-003": ("PO_GRN_CONSUMPTION_EXCEEDED", "HIGH", "AP"),
     "CONS-004": ("PO_GRN_CONSUMPTION_EXCEEDED", "HIGH", "AP"),
     "DATE-001": ("DATE_POLICY_EXCEPTION", "HIGH", "AP"),
-    "DATE-002": ("DATE_POLICY_EXCEPTION", "HIGH", "AP"),
-    "DATE-003": ("DATE_POLICY_EXCEPTION", "HIGH", "AP"),
+    "DATE-002": ("DATE_SEQUENCE_ERROR", "HIGH", "AP"),
+    "DATE-003": ("DATE_SEQUENCE_ERROR", "HIGH", "AP"),
     "DATE-004": ("DATE_POLICY_EXCEPTION", "HIGH", "AP"),
     "DATE-005": ("DATE_POLICY_EXCEPTION", "HIGH", "AP"),
     "TAX-001": ("TAX_MISMATCH", "HIGH", "AP"),
@@ -253,3 +253,4 @@ class MockLLMClient(LLMClient):
             }
 
         raise ValueError(f"Unsupported mock LLM task: {task}")
+

@@ -6,7 +6,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import String, cast, or_, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -24,14 +24,19 @@ from app.services.grn_status_control import (
 from app.services.po_grn_consumption_ledger_service import (
     ACTIVE_LEDGER_STATUSES,
 )
+from app.services.business_invoice_identity import (
+    build_business_invoice_key,
+    business_invoice_key,
+)
+from app.services.status_catalog_service import LedgerStatus
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-from ap_database.engines import get_master_engine
 from ap_database.master_models import SapPostedInvoiceMaster
+from ap_database.workflow_master_repository import WorkflowMasterRepository
 
 
 CONSUMING_INVOICE_STATUSES = frozenset(
@@ -92,9 +97,18 @@ class PO_GRNConsumptionControl:
         self,
         db: Session,
         master_engine: Engine | None = None,
+        master_repository: WorkflowMasterRepository | None = None,
     ):
         self.db = db
-        self.master_engine = master_engine
+        if master_repository is None and master_engine is None:
+            raise ValueError(
+                "PO_GRNConsumptionControl requires the workflow's supplied "
+                "master_repository or master_engine."
+            )
+        self.master_repository = master_repository or WorkflowMasterRepository(
+            master_engine
+        )
+        self.master_engine = self.master_repository.engine
 
     def evaluate(
         self,
@@ -116,7 +130,7 @@ class PO_GRNConsumptionControl:
             if grn["status"] in VALID_GRN_STATUSES
         ]
 
-        prior = self._prior_consumption(invoice)
+        prior = self._prior_consumption(invoice, context)
         line_details = []
         cons_001_failures = []
         cons_002_failures = []
@@ -160,6 +174,10 @@ class PO_GRNConsumptionControl:
                 item_key,
                 {},
             ).get("amount", Decimal("0"))
+            prior_sources = prior.get(
+                item_key,
+                {},
+            ).get("sources", [])
             remaining_grn_quantity = max(
                 received_quantity - prior_quantity,
                 Decimal("0"),
@@ -169,7 +187,11 @@ class PO_GRNConsumptionControl:
 
             detail = {
                 "po_item": item_key,
+                "ordered_quantity": self._float(ordered_quantity),
+                "received_quantity": float(received_quantity),
+                "prior_consumed_quantity": float(prior_quantity),
                 "current_invoice_quantity": float(current_quantity),
+                "remaining_quantity": float(remaining_grn_quantity),
                 "current_invoice_amount": float(current_amount),
                 "po_ordered_quantity": self._float(ordered_quantity),
                 "po_unit_price": self._float(po_unit_price),
@@ -184,10 +206,28 @@ class PO_GRNConsumptionControl:
                     cumulative_quantity
                 ),
                 "cumulative_amount_with_current": float(cumulative_amount),
-                "prior_sources": prior.get(
-                    item_key,
-                    {},
-                ).get("sources", []),
+                "prior_sources": prior_sources,
+                "prior_consumption_sources": prior_sources,
+                "prior_source_invoice_ids": [
+                    source.get("invoice_id")
+                    for source in prior_sources
+                    if source.get("invoice_id")
+                ],
+                "prior_source_invoice_numbers": [
+                    source.get("invoice_number")
+                    for source in prior_sources
+                    if source.get("invoice_number")
+                ],
+                "prior_source_ledger_statuses": [
+                    source.get("ledger_status")
+                    for source in prior_sources
+                    if source.get("ledger_status")
+                ],
+                "prior_source_grn_numbers": [
+                    source.get("grn_number")
+                    for source in prior_sources
+                    if source.get("grn_number")
+                ],
             }
 
             if (
@@ -286,27 +326,58 @@ class PO_GRNConsumptionControl:
     def _prior_consumption(
         self,
         invoice: Invoice,
+        context: dict[str, Any] | None = None,
     ) -> dict[str, dict[str, Any]]:
         consumption: dict[str, dict[str, Any]] = {}
         counted_invoice_keys = set()
         ledger_invoice_ids = set()
         ledger_invoice_keys = set()
+        current_business_key = business_invoice_key(invoice, context)
 
-        ledger_rows = self.db.scalars(
-            select(POGRNConsumptionLedger).where(
+        successful_posting_ids = set(
+            self.db.scalars(
+                select(PostingAttempt.invoice_id).where(
+                    func.upper(PostingAttempt.status) == "SUCCESS"
+                )
+            ).all()
+        )
+
+        ledger_rows = self.db.execute(
+            select(POGRNConsumptionLedger, Invoice)
+            .join(Invoice, Invoice.id == POGRNConsumptionLedger.invoice_id)
+            .where(
                 POGRNConsumptionLedger.po_number == invoice.po_number,
                 POGRNConsumptionLedger.invoice_id != invoice.id,
             )
         ).all()
-        for ledger_row in ledger_rows:
-            ledger_invoice_ids.add(ledger_row.invoice_id)
-            ledger_invoice_keys.add(
-                _invoice_key(ledger_row.invoice_number)
+        for ledger_row, ledger_invoice in ledger_rows:
+            row_business_key = (
+                ledger_row.business_invoice_key
+                or business_invoice_key(ledger_invoice)
             )
+            if row_business_key == current_business_key:
+                continue
+            # Once a ledger row exists it is authoritative for that invoice.
+            # Inactive rows must suppress fallback status-based inference.
+            ledger_invoice_ids.add(ledger_row.invoice_id)
+            ledger_invoice_keys.add(row_business_key)
             if ledger_row.ledger_status not in ACTIVE_LEDGER_STATUSES:
                 continue
+            if (
+                ledger_row.ledger_status == LedgerStatus.RESERVED
+                and ledger_invoice.status not in CONSUMING_INVOICE_STATUSES
+            ):
+                continue
+            if (
+                ledger_row.ledger_status == LedgerStatus.CONSUMED
+                and ledger_invoice.id not in successful_posting_ids
+                and str(ledger_invoice.status or "").upper() != "POSTED"
+                and str(ledger_invoice.posting_status or "").upper()
+                != "POSTED"
+            ):
+                continue
             counted_invoice_keys.add(
-                _invoice_key(ledger_row.invoice_number)
+                row_business_key
             )
             self._add_consumption(
                 consumption,
@@ -319,6 +390,9 @@ class PO_GRNConsumptionControl:
                     "invoice_id": ledger_row.invoice_id,
                     "invoice_number": ledger_row.invoice_number,
                     "status": ledger_row.ledger_status,
+                    "ledger_status": ledger_row.ledger_status,
+                    "business_invoice_key": row_business_key,
+                    "grn_number": ledger_row.grn_number,
                 },
             )
 
@@ -342,17 +416,19 @@ class PO_GRNConsumptionControl:
 
         seen_line_ids = set()
         for prior_invoice, line in rows:
+            prior_business_key = business_invoice_key(prior_invoice)
             if (
                 prior_invoice.id in ledger_invoice_ids
-                or _invoice_key(prior_invoice.invoice_number)
+                or prior_business_key
                 in ledger_invoice_keys
+                or prior_business_key == current_business_key
             ):
                 continue
             if line.id in seen_line_ids:
                 continue
             seen_line_ids.add(line.id)
             counted_invoice_keys.add(
-                _invoice_key(prior_invoice.invoice_number)
+                prior_business_key
             )
             self._add_consumption(
                 consumption,
@@ -367,23 +443,62 @@ class PO_GRNConsumptionControl:
                     "invoice_id": prior_invoice.id,
                     "invoice_number": prior_invoice.invoice_number,
                     "status": prior_invoice.status,
+                    "ledger_status": None,
+                    "business_invoice_key": prior_business_key,
+                    "grn_number": None,
                 },
             )
 
         table = SapPostedInvoiceMaster.__table__
         master_statement = select(
             table.c.invoice_number,
+            table.c.vendor_number,
+            table.c.vendor_name,
+            table.c.invoice_date,
+            table.c.raw_json,
             table.c.items_json,
             table.c.posting_status,
         ).where(table.c.po_number == invoice.po_number)
-        with (self.master_engine or get_master_engine()).connect() as connection:
+        with self.master_repository.connect() as connection:
             posted_rows = connection.execute(
                 master_statement
             ).mappings().all()
 
         for row in posted_rows:
-            row_invoice_key = _invoice_key(row["invoice_number"])
-            if row_invoice_key == _invoice_key(invoice.invoice_number):
+            raw_json = row["raw_json"] if isinstance(row["raw_json"], dict) else {}
+            row_invoice_key = build_business_invoice_key(
+                company_code=raw_json.get("company_code") or "1000",
+                vendor_number=(
+                    row["vendor_number"]
+                    or raw_json.get("vendor_number")
+                    or row["vendor_name"]
+                ),
+                invoice_number=row["invoice_number"],
+                fiscal_year=(
+                    row["invoice_date"].year
+                    if row["invoice_date"] is not None
+                    else raw_json.get("fiscal_year")
+                ),
+            )
+            row_fiscal_year = (
+                row["invoice_date"].year
+                if row["invoice_date"] is not None
+                else raw_json.get("fiscal_year")
+            )
+            current_fiscal_year = (
+                invoice.invoice_date.year
+                if invoice.invoice_date is not None
+                else None
+            )
+            legacy_same_business_invoice = (
+                _invoice_key(row["invoice_number"])
+                == _invoice_key(invoice.invoice_number)
+                and row_fiscal_year == current_fiscal_year
+            )
+            if (
+                row_invoice_key == current_business_key
+                or legacy_same_business_invoice
+            ):
                 continue
             if (
                 row_invoice_key in counted_invoice_keys
@@ -415,6 +530,9 @@ class PO_GRNConsumptionControl:
                         "source": "sap_posted_invoice_master",
                         "invoice_number": row["invoice_number"],
                         "status": row["posting_status"],
+                        "ledger_status": None,
+                        "business_invoice_key": row_invoice_key,
+                        "grn_number": None,
                     },
                 )
 

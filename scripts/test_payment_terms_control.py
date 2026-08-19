@@ -17,6 +17,7 @@ os.environ.setdefault("APP_ENV", "test")
 from app.models import Invoice, InvoiceLine
 from app.services.payment_terms_control import (
     PaymentTermsControl,
+    calculate_due_date,
     normalize_payment_terms,
 )
 
@@ -29,6 +30,8 @@ def main() -> int:
 
     assert normalize_payment_terms("NET 30") == "NET30"
     assert normalize_payment_terms("N30") == "NET30"
+    assert calculate_due_date("2026-06-01", "NET 30") == date(2026, 7, 1)
+    assert calculate_due_date("2026-06-01", "unknown") is None
 
     normalized = _by_code(
         control.evaluate(

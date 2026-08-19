@@ -8,7 +8,17 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.integrations.llm.base import LLMClient
-from app.models import Invoice, InvoiceLine, WorkflowEvent
+from app.models import ExtractionAttempt, Invoice, InvoiceLine, WorkflowEvent
+from app.schemas import ExtractedLine
+from app.services.currency_resolution_service import normalize_currency_value
+from app.services.date_normalization_service import normalize_date
+from app.services.extraction_confidence_service import (
+    evaluate_confidence,
+    low_confidence_mandatory_fields,
+    normalize_confidence,
+)
+from app.services.serializers import make_json_safe
+from pydantic import BaseModel, ConfigDict, Field
 from app.services.status_catalog_service import (
     InvoiceWorkflowStatus,
     transition_invoice_status,
@@ -32,6 +42,7 @@ def _payload(value: Any) -> dict[str, Any]:
             "tax_amount": value.tax_amount,
             "total_amount": value.total_amount,
             "confidence": value.extraction_confidence,
+            "field_confidence": value.extraction_field_confidence,
             "lines": [
                 {
                     "line_number": line.line_number,
@@ -57,6 +68,7 @@ def _payload(value: Any) -> dict[str, Any]:
             "tax_amount",
             "total_amount",
             "confidence",
+            "field_confidence",
             "lines",
         )
     }
@@ -67,16 +79,26 @@ def _present(value: Any) -> bool:
 
 
 def _date_value(value: Any) -> date | None:
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    if not _present(value):
-        return None
-    try:
-        return date.fromisoformat(str(value).strip()[:10])
-    except ValueError:
-        return None
+    return normalize_date(value).normalized_date
+
+
+class ExtractionRepairPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    invoice_number: str | None = None
+    vendor_name: str | None = None
+    vendor_number: str | None = None
+    po_number: str | None = None
+    invoice_date: Any = None
+    due_date: Any = None
+    currency: str | None = None
+    subtotal: float | None = None
+    tax_amount: float | None = None
+    total_amount: float | None = None
+    payment_terms: str | None = None
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    field_confidence: dict[str, Any] | None = None
+    lines: list[ExtractedLine] | None = None
 
 
 def _decimal(value: Any) -> Decimal | None:
@@ -120,9 +142,6 @@ def evaluate_extraction_quality(
     confidence = _decimal(
         data.get("confidence", data.get("extraction_confidence"))
     )
-    if trusted_source and confidence is None:
-        confidence = Decimal("1")
-
     subtotal = _decimal(data.get("subtotal"))
     tax_amount = _decimal(data.get("tax_amount"))
     total_amount = _decimal(data.get("total_amount"))
@@ -132,7 +151,10 @@ def evaluate_extraction_quality(
     total_present = total_amount is not None
     confidence_low = (
         confidence is None
-        or confidence < Decimal(str(settings.min_extraction_confidence))
+        or confidence < Decimal(str(settings.ocr_auto_process_threshold))
+    )
+    low_mandatory_fields = low_confidence_mandatory_fields(
+        data.get("field_confidence")
     )
     header_financial_severity = (
         "ERROR"
@@ -166,7 +188,11 @@ def evaluate_extraction_quality(
             "OCR-001",
             "Invoice number is present",
             _present(data.get("invoice_number")),
-            "ERROR",
+            (
+                "WARNING"
+                if settings.allow_master_data_currency_inference
+                else "ERROR"
+            ),
             (
                 "Invoice number was extracted."
                 if _present(data.get("invoice_number"))
@@ -263,19 +289,30 @@ def evaluate_extraction_quality(
             "OCR-008",
             "Extraction confidence meets threshold",
             confidence is not None
-            and confidence >= Decimal(str(settings.min_extraction_confidence)),
+            and confidence >= Decimal(
+                str(settings.ocr_auto_process_threshold)
+            )
+            and not low_mandatory_fields,
             "ERROR",
             (
                 "Extraction confidence meets the configured threshold."
                 if confidence is not None
                 and confidence
-                >= Decimal(str(settings.min_extraction_confidence))
+                >= Decimal(str(settings.ocr_auto_process_threshold))
+                and not low_mandatory_fields
                 else "Extraction confidence is missing or below threshold."
             ),
             {
                 "confidence": float(confidence) if confidence is not None else None,
-                "minimum_confidence": settings.min_extraction_confidence,
+                "minimum_confidence": settings.ocr_auto_process_threshold,
+                "retry_threshold": settings.ocr_retry_threshold,
                 "trusted_structured_source": trusted_source,
+                "category": (
+                    None
+                    if not confidence_low and not low_mandatory_fields
+                    else "OCR_LOW_CONFIDENCE"
+                ),
+                "low_confidence_mandatory_fields": low_mandatory_fields,
             },
         ),
         _result(
@@ -366,7 +403,7 @@ def recommended_extraction_status(
     if is_extraction_clean(results):
         return InvoiceWorkflowStatus.EXTRACTED
     maximum = (
-        settings.extraction_max_retry_attempts
+        settings.ocr_max_retries
         if max_retry_attempts is None
         else max_retry_attempts
     )
@@ -394,6 +431,29 @@ class ExtractionQualityService:
                 "Extraction quality processing started.",
                 actor="ExtractionQualityService",
             )
+        elif invoice.status in {
+            InvoiceWorkflowStatus.EXTRACTION_REVIEW_REQUIRED,
+            InvoiceWorkflowStatus.EXTRACTION_FAILED,
+        }:
+            transition_invoice_status(
+                invoice,
+                InvoiceWorkflowStatus.EXTRACTION_RETRY_REQUIRED,
+                "Enhanced extraction retry requested.",
+                actor="ExtractionQualityService",
+            )
+            transition_invoice_status(
+                invoice,
+                InvoiceWorkflowStatus.EXTRACTION_IN_PROGRESS,
+                "Enhanced extraction retry started.",
+                actor="ExtractionQualityService",
+            )
+        elif invoice.status == InvoiceWorkflowStatus.EXTRACTION_RETRY_REQUIRED:
+            transition_invoice_status(
+                invoice,
+                InvoiceWorkflowStatus.EXTRACTION_IN_PROGRESS,
+                "Enhanced extraction retry started.",
+                actor="ExtractionQualityService",
+            )
 
         initial_results = self._evaluate_and_record(
             invoice, raw_evidence=raw_evidence, retry_count=0
@@ -409,13 +469,16 @@ class ExtractionQualityService:
             return initial_results
 
         max_retries = (
-            settings.extraction_max_retry_attempts if allow_retry else 0
+            settings.ocr_max_retries if allow_retry else 0
         )
         if max_retries <= 0:
             self._mark_review_required(invoice, initial_results, 0)
             return initial_results
 
         current_results = initial_results
+        initial_attempt_number = int(
+            invoice.extraction_attempt_number or 1
+        )
         for retry_attempt in range(1, max_retries + 1):
             transition_invoice_status(
                 invoice,
@@ -469,8 +532,46 @@ class ExtractionQualityService:
                     "Targeted re-extraction response received.",
                     actor="ExtractionQualityService",
                 )
-                self._apply_corrections(invoice, corrected)
+                validated = ExtractionRepairPayload.model_validate(corrected)
+                self._apply_corrections(
+                    invoice,
+                    validated.model_dump(exclude_none=True),
+                )
+                self._record_attempt(
+                    invoice,
+                    initial_attempt_number + retry_attempt,
+                    raw_evidence=corrected,
+                )
             except Exception as exc:
+                self.db.add(
+                    ExtractionAttempt(
+                        invoice_id=invoice.id,
+                        attempt_number=(
+                            initial_attempt_number + retry_attempt
+                        ),
+                        status="FAILED",
+                        overall_confidence=invoice.extraction_confidence,
+                        field_confidence=(
+                            invoice.extraction_field_confidence or {}
+                        ),
+                        warnings=[
+                            *(invoice.extraction_warnings or []),
+                            f"{type(exc).__name__}: extraction retry failed.",
+                        ],
+                        extraction_provider=invoice.extraction_provider,
+                        extraction_model=invoice.extraction_model,
+                        schema_version=invoice.extraction_version,
+                        raw_evidence={"error_type": type(exc).__name__},
+                    )
+                )
+                invoice.extraction_attempt_number = (
+                    initial_attempt_number + retry_attempt
+                )
+                invoice.extraction_retry_count = max(
+                    int(invoice.extraction_retry_count or 0),
+                    retry_attempt,
+                )
+                invoice.extraction_review_status = "MANUAL_REVIEW"
                 transition_invoice_status(
                     invoice,
                     InvoiceWorkflowStatus.EXTRACTION_IN_PROGRESS,
@@ -631,7 +732,6 @@ class ExtractionQualityService:
             "vendor_name",
             "vendor_number",
             "po_number",
-            "currency",
             "subtotal",
             "tax_amount",
             "total_amount",
@@ -639,14 +739,44 @@ class ExtractionQualityService:
         ):
             if field in corrected:
                 setattr(invoice, field, corrected[field])
+        if "vendor_number" in corrected:
+            invoice.extracted_vendor_number = corrected["vendor_number"]
+            invoice.resolved_vendor_number = None
+        if "currency" in corrected:
+            currency, _ = normalize_currency_value(corrected["currency"])
+            invoice.extracted_currency = currency
+            invoice.currency = currency
+            invoice.resolved_currency = None
         if "invoice_date" in corrected:
-            parsed = _date_value(corrected["invoice_date"])
-            if parsed is not None:
-                invoice.invoice_date = parsed
+            parsed = normalize_date(corrected["invoice_date"])
+            invoice.raw_invoice_date = str(corrected["invoice_date"])
+            invoice.invoice_date = parsed.normalized_date
+            invoice.date_parse_status = parsed.status
+            invoice.date_parse_warning = parsed.warning or parsed.error
+        if "due_date" in corrected:
+            parsed_due = normalize_date(corrected["due_date"])
+            invoice.raw_due_date = str(corrected["due_date"])
+            invoice.due_date = parsed_due.normalized_date
         if "confidence" in corrected:
-            confidence = _decimal(corrected["confidence"])
-            if confidence is not None:
-                invoice.extraction_confidence = float(confidence)
+            confidence, warning = normalize_confidence(
+                corrected["confidence"]
+            )
+            invoice.extraction_confidence = confidence
+            invoice.extraction_confidence_source = (
+                "ENHANCED_RETRY_CONFIDENCE"
+            )
+            if warning:
+                invoice.extraction_warnings = [
+                    *(invoice.extraction_warnings or []),
+                    warning,
+                ]
+            invoice.extraction_review_status = evaluate_confidence(
+                confidence
+            ).status
+        if "field_confidence" in corrected:
+            invoice.extraction_field_confidence = corrected[
+                "field_confidence"
+            ]
         if "lines" in corrected and isinstance(corrected["lines"], list):
             invoice.lines.clear()
             for index, line in enumerate(corrected["lines"], start=1):
@@ -661,6 +791,43 @@ class ExtractionQualityService:
                     )
                 )
 
+    def _record_attempt(
+        self,
+        invoice: Invoice,
+        attempt_number: int,
+        *,
+        raw_evidence: Any,
+    ) -> None:
+        invoice.extraction_attempt_number = attempt_number
+        invoice.extraction_retry_count = max(
+            int(invoice.extraction_retry_count or 0),
+            attempt_number - 1,
+        )
+        decision = evaluate_confidence(invoice.extraction_confidence)
+        invoice.extraction_review_status = decision.status
+        self.db.add(
+            ExtractionAttempt(
+                invoice_id=invoice.id,
+                attempt_number=attempt_number,
+                status=decision.status,
+                overall_confidence=invoice.extraction_confidence,
+                field_confidence=invoice.extraction_field_confidence or {},
+                warnings=invoice.extraction_warnings or [],
+                ocr_provider=(invoice.extraction_raw or {}).get(
+                    "ocr_provider"
+                ),
+                ocr_version=(invoice.extraction_raw or {}).get("ocr_version"),
+                extraction_provider=invoice.extraction_provider,
+                extraction_model=invoice.extraction_model,
+                schema_version=invoice.extraction_version,
+                raw_evidence=(
+                    make_json_safe(raw_evidence)
+                    if isinstance(raw_evidence, dict)
+                    else {}
+                ),
+            )
+        )
+
     def _store_quality(
         self,
         invoice: Invoice,
@@ -670,6 +837,10 @@ class ExtractionQualityService:
         retry_count: int,
         review_reason: str | None,
     ) -> None:
+        invoice.extraction_retry_count = max(
+            int(invoice.extraction_retry_count or 0),
+            int(retry_count),
+        )
         raw = dict(invoice.extraction_raw or {})
         raw["extraction_quality"] = {
             "status": status,

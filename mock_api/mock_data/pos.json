@@ -1,577 +1,552 @@
 [
-    {
-      "document_type": "po",
-      "po_number": "PO-CLEAN-001",
-      "vendor_name": "Clean Supplies Ltd",
-      "vendor_number": "CLEAN_SUPPLIES_LTD",
-      "po_date": "2026-06-01",
-      "currency": "INR",
-      "document_subtotal": 10000.0,
-      "tax_amount": 1800.0,
-      "vat_percent": 18.0,
-      "document_total": 11800.0,
-      "amount": 11800.0,
-      "payment_terms": "NET 30",
-      "po_status": "Open",
-      "line_items": [
-        {
-          "line_no": 1,
-          "description": "Office supplies",
-          "qty": 10.0,
-          "unit_price": 1000.0,
-          "line_amount": 10000.0
-        }
-      ],
-      "last_modified": "2026-06-29T10:00:00"
-    },
-    {
-      "document_type": "po",
-      "po_number": "PO-GRN-MISSING-001",
-      "vendor_name": "GRN Missing Vendor Ltd",
-      "vendor_number": "GRN_MISSING_VENDOR_LTD",
-      "po_date": "2026-06-01",
-      "currency": "INR",
-      "document_subtotal": 10000.0,
-      "tax_amount": 1800.0,
-      "vat_percent": 18.0,
-      "document_total": 11800.0,
-      "amount": 11800.0,
-      "payment_terms": "NET 30",
-      "po_status": "Open",
-      "line_items": [
-        {
-          "line_no": 1,
-          "description": "Consulting services",
-          "qty": 5.0,
-          "unit_price": 2000.0,
-          "line_amount": 10000.0
-        }
-      ],
-      "last_modified": "2026-06-29T10:00:00"
-    },
-    {
-      "document_type": "po",
-      "po_number": "PO-VENDOR-001",
-      "vendor_name": "Correct Vendor Ltd",
-      "vendor_number": "CORRECT_VENDOR_LTD",
-      "po_date": "2026-06-01",
-      "currency": "INR",
-      "document_subtotal": 10000.0,
-      "tax_amount": 1800.0,
-      "vat_percent": 18.0,
-      "document_total": 11800.0,
-      "amount": 11800.0,
-      "payment_terms": "NET 30",
-      "po_status": "Open",
-      "line_items": [
-        {
-          "line_no": 1,
-          "description": "Laptop accessories",
-          "qty": 4.0,
-          "unit_price": 2500.0,
-          "line_amount": 10000.0
-        }
-      ],
-      "last_modified": "2026-06-29T10:00:00"
-    },
-    {
-      "document_type": "po",
-      "po_number": "PO-AMOUNT-001",
-      "vendor_name": "Amount Test Vendor Ltd",
-      "vendor_number": "AMOUNT_TEST_VENDOR_LTD",
-      "po_date": "2026-06-01",
-      "currency": "INR",
-      "document_subtotal": 10000.0,
-      "tax_amount": 1800.0,
-      "vat_percent": 18.0,
-      "document_total": 11800.0,
-      "amount": 11800.0,
-      "payment_terms": "NET 30",
-      "po_status": "Open",
-      "line_items": [
-        {
-          "line_no": 1,
-          "description": "Professional services",
-          "qty": 6.0,
-          "unit_price": 1666.6667,
-          "line_amount": 10000.0
-        }
-      ],
-      "last_modified": "2026-06-29T10:00:00"
-    },
-    {
-      "document_type": "po",
-      "po_number": "PO-TAX-001",
-      "vendor_name": "Tax Test Vendor Ltd",
-      "vendor_number": "TAX_TEST_VENDOR_LTD",
-      "po_date": "2026-06-01",
-      "currency": "INR",
-      "document_subtotal": 10000.0,
-      "tax_amount": 1800.0,
-      "vat_percent": 18.0,
-      "document_total": 11800.0,
-      "amount": 11800.0,
-      "payment_terms": "NET 30",
-      "po_status": "Open",
-      "line_items": [
-        {
-          "line_no": 1,
-          "description": "Taxable supplies",
-          "qty": 10.0,
-          "unit_price": 1000.0,
-          "line_amount": 10000.0
-        }
-      ],
-      "last_modified": "2026-06-29T10:00:00"
-    },
-    {
-      "document_type": "po",
-      "po_number": "PO-CLOSED-001",
-      "vendor_name": "Closed PO Vendor Ltd",
-      "vendor_number": "CLOSED_PO_VENDOR_LTD",
-      "po_date": "2026-06-01",
-      "currency": "INR",
-      "document_subtotal": 10000.0,
-      "tax_amount": 1800.0,
-      "vat_percent": 18.0,
-      "document_total": 11800.0,
-      "amount": 11800.0,
-      "payment_terms": "NET 30",
-      "po_status": "Closed",
-      "line_items": [
-        {
-          "line_no": 1,
-          "description": "Closed PO service",
-          "qty": 10.0,
-          "unit_price": 1000.0,
-          "line_amount": 10000.0
-        }
-      ],
-      "last_modified": "2026-06-29T10:00:00"
-    },
-    {
-      "document_type": "po",
-      "po_number": "PO-DUP-001",
-      "vendor_name": "Duplicate Test Vendor Ltd",
-      "vendor_number": "DUPLICATE_TEST_VENDOR_LTD",
-      "po_date": "2026-06-01",
-      "currency": "INR",
-      "document_subtotal": 10000.0,
-      "tax_amount": 1800.0,
-      "vat_percent": 18.0,
-      "document_total": 11800.0,
-      "amount": 11800.0,
-      "payment_terms": "NET 30",
-      "po_status": "Open",
-      "line_items": [
-        {
-          "line_no": 1,
-          "description": "Duplicate upload service",
-          "qty": 10.0,
-          "unit_price": 1000.0,
-          "line_amount": 10000.0
-        }
-      ],
-      "last_modified": "2026-06-29T10:00:00"
-    },
-    {
-      "document_type": "po",
-      "po_number": "PO-PENDING-GRN-001",
-      "vendor_name": "Pending GRN Vendor Ltd",
-      "vendor_number": "PENDING_GRN_VENDOR_LTD",
-      "po_date": "2026-06-01",
-      "currency": "INR",
-      "document_subtotal": 10000.0,
-      "tax_amount": 1800.0,
-      "vat_percent": 18.0,
-      "document_total": 11800.0,
-      "amount": 11800.0,
-      "payment_terms": "NET 30",
-      "po_status": "Open",
-      "line_items": [
-        {
-          "line_no": 1,
-          "description": "Goods awaiting receipt",
-          "qty": 8.0,
-          "unit_price": 1250.0,
-          "line_amount": 10000.0
-        }
-      ],
-      "last_modified": "2026-06-29T10:00:00"
-    },
-    {
-      "document_type": "po",
-      "po_number": "PO-POSTED-DUP-001",
-      "vendor_name": "Posted Duplicate Vendor Ltd",
-      "vendor_number": "POSTED_DUPLICATE_VENDOR_LTD",
-      "po_date": "2026-06-01",
-      "currency": "INR",
-      "document_subtotal": 10000.0,
-      "tax_amount": 1800.0,
-      "vat_percent": 18.0,
-      "document_total": 11800.0,
-      "amount": 11800.0,
-      "payment_terms": "NET 30",
-      "po_status": "Open",
-      "line_items": [
-        {
-          "line_no": 1,
-          "description": "Previously posted service",
-          "qty": 10.0,
-          "unit_price": 1000.0,
-          "line_amount": 10000.0
-        }
-      ],
-      "last_modified": "2026-06-29T10:00:00"
-    },
-    {
-      "document_type": "po",
-      "po_number": "PO-PAYTERMS-001",
-      "vendor_name": "Payment Terms Vendor Ltd",
-      "vendor_number": "PAYMENT_TERMS_VENDOR_LTD",
-      "po_date": "2026-06-01",
-      "currency": "INR",
-      "document_subtotal": 10000.0,
-      "tax_amount": 1800.0,
-      "vat_percent": 18.0,
-      "document_total": 11800.0,
-      "amount": 11800.0,
-      "payment_terms": "NET 30",
-      "po_status": "Open",
-      "line_items": [
-        {
-          "line_no": 1,
-          "description": "Payment terms test",
-          "qty": 10.0,
-          "unit_price": 1000.0,
-          "line_amount": 10000.0
-        }
-      ],
-      "last_modified": "2026-06-29T10:00:00"
-    },
-    {
-      "document_type": "po",
-      "po_number": "PO-DATE-001",
-      "vendor_name": "Date Test Vendor Ltd",
-      "vendor_number": "DATE_TEST_VENDOR_LTD",
-      "po_date": "2026-01-10",
-      "currency": "INR",
-      "document_subtotal": 10000.0,
-      "tax_amount": 1800.0,
-      "vat_percent": 18.0,
-      "document_total": 11800.0,
-      "amount": 11800.0,
-      "payment_terms": "NET 30",
-      "po_status": "Open",
-      "line_items": [
-        {
-          "line_no": 1,
-          "description": "Date sequence test",
-          "qty": 10.0,
-          "unit_price": 1000.0,
-          "line_amount": 10000.0
-        }
-      ],
-      "last_modified": "2026-06-29T10:00:00"
-    },
-    {
-      "document_type": "po",
-      "po_number": "PO-CONSUME-001",
-      "vendor_name": "Consumption Vendor Ltd",
-      "vendor_number": "CONSUMPTION_VENDOR_LTD",
-      "po_date": "2026-06-01",
-      "currency": "INR",
-      "document_subtotal": 10000.0,
-      "tax_amount": 1800.0,
-      "vat_percent": 18.0,
-      "document_total": 11800.0,
-      "amount": 11800.0,
-      "payment_terms": "NET 30",
-      "po_status": "Open",
-      "line_items": [
-        {
-          "line_no": 1,
-          "description": "Consumption test item",
-          "qty": 15.0,
-          "unit_price": 1000.0,
-          "line_amount": 10000.0
-        }
-      ],
-      "last_modified": "2026-06-29T10:00:00"
-    },
-    {
-      "document_type": "po",
-      "po_number": "PO-OCR-LOW-001",
-      "vendor_name": "OCR Low Confidence Ltd",
-      "vendor_number": "OCR_LOW_CONFIDENCE_LTD",
-      "po_date": "2026-06-01",
-      "currency": "INR",
-      "document_subtotal": 10000.0,
-      "tax_amount": 1800.0,
-      "vat_percent": 18.0,
-      "document_total": 11800.0,
-      "amount": 11800.0,
-      "payment_terms": "NET 30",
-      "po_status": "Open",
-      "line_items": [
-        {
-          "line_no": 1,
-          "description": "OCR low confidence service",
-          "qty": 10.0,
-          "unit_price": 1000.0,
-          "line_amount": 10000.0
-        }
-      ],
-      "last_modified": "2026-06-29T10:00:00"
-    },
-    {
-      "document_type": "po",
-      "po_number": "PO-LINES-001",
-      "vendor_name": "Missing Lines Vendor Ltd",
-      "vendor_number": "MISSING_LINES_VENDOR_LTD",
-      "po_date": "2026-06-01",
-      "currency": "INR",
-      "document_subtotal": 10000.0,
-      "tax_amount": 1800.0,
-      "vat_percent": 18.0,
-      "document_total": 11800.0,
-      "amount": 11800.0,
-      "payment_terms": "NET 30",
-      "po_status": "Open",
-      "line_items": [
-        {
-          "line_no": 1,
-          "description": "Reference item",
-          "qty": 10.0,
-          "unit_price": 1000.0,
-          "line_amount": 10000.0
-        }
-      ],
-      "last_modified": "2026-06-29T10:00:00"
-    },
-    {
-      "document_type": "po",
-      "po_number": "PO-TOTAL-ONLY-001",
-      "vendor_name": "Total Only Vendor Ltd",
-      "vendor_number": "TOTAL_ONLY_VENDOR_LTD",
-      "po_date": "2026-06-01",
-      "currency": "INR",
-      "document_subtotal": 10000.0,
-      "tax_amount": 1800.0,
-      "vat_percent": 18.0,
-      "document_total": 11800.0,
-      "amount": 11800.0,
-      "payment_terms": "NET 30",
-      "po_status": "Open",
-      "line_items": [
-        {
-          "line_no": 1,
-          "description": "Reference item",
-          "qty": 10.0,
-          "unit_price": 1000.0,
-          "line_amount": 10000.0
-        }
-      ],
-      "last_modified": "2026-06-29T10:00:00"
-    },
-    {
-      "document_type": "po",
-      "po_number": "PO-OCR-RETRY-001",
-      "vendor_name": "OCR Retry Vendor Ltd",
-      "vendor_number": "OCR_RETRY_VENDOR_LTD",
-      "po_date": "2026-06-01",
-      "currency": "INR",
-      "document_subtotal": 10000.0,
-      "tax_amount": 1800.0,
-      "vat_percent": 18.0,
-      "document_total": 11800.0,
-      "amount": 11800.0,
-      "payment_terms": "NET 30",
-      "po_status": "Open",
-      "line_items": [
-        {
-          "line_no": 1,
-          "description": "OCR retry item",
-          "qty": 10.0,
-          "unit_price": 1000.0,
-          "line_amount": 10000.0
-        }
-      ],
-      "last_modified": "2026-06-29T10:00:00"
-    },
-    {
-      "document_type": "po",
-      "po_number": "PO-OCR-FAIL-001",
-      "vendor_name": "OCR Failure Vendor Ltd",
-      "vendor_number": "OCR_FAILURE_VENDOR_LTD",
-      "po_date": "2026-06-01",
-      "currency": "INR",
-      "document_subtotal": 10000.0,
-      "tax_amount": 1800.0,
-      "vat_percent": 18.0,
-      "document_total": 11800.0,
-      "amount": 11800.0,
-      "payment_terms": "NET 30",
-      "po_status": "Open",
-      "line_items": [
-        {
-          "line_no": 1,
-          "description": "Unreadable invoice test",
-          "qty": 10.0,
-          "unit_price": 1000.0,
-          "line_amount": 10000.0
-        }
-      ],
-      "last_modified": "2026-06-29T10:00:00"
-    },
-    {
-      "document_type": "po",
-      "po_number": "PO-RESP-GENERAL-001",
-      "vendor_name": "Response General Vendor Ltd",
-      "vendor_number": "RESPONSE_GENERAL_VENDOR_LTD",
-      "po_date": "2026-06-01",
-      "currency": "INR",
-      "document_subtotal": 10000.0,
-      "tax_amount": 1800.0,
-      "vat_percent": 18.0,
-      "document_total": 11800.0,
-      "amount": 11800.0,
-      "payment_terms": "NET 30",
-      "po_status": "Open",
-      "line_items": [
-        {
-          "line_no": 1,
-          "description": "Response test without GRN",
-          "qty": 10.0,
-          "unit_price": 1000.0,
-          "line_amount": 10000.0
-        }
-      ],
-      "last_modified": "2026-06-29T10:00:00"
-    },
-    {
-      "document_type": "po",
-      "po_number": "PO-RESP-TERMS-001",
-      "vendor_name": "Response Terms Vendor Ltd",
-      "vendor_number": "RESPONSE_TERMS_VENDOR_LTD",
-      "po_date": "2026-06-01",
-      "currency": "INR",
-      "document_subtotal": 10000.0,
-      "tax_amount": 1800.0,
-      "vat_percent": 18.0,
-      "document_total": 11800.0,
-      "amount": 11800.0,
-      "payment_terms": "NET 30",
-      "po_status": "Open",
-      "line_items": [
-        {
-          "line_no": 1,
-          "description": "Payment terms response test",
-          "qty": 10.0,
-          "unit_price": 1000.0,
-          "line_amount": 10000.0
-        }
-      ],
-      "last_modified": "2026-06-29T10:00:00"
-    },
-    {
-      "document_type": "po",
-      "po_number": "PO-RECHECK-POSTED-001",
-      "vendor_name": "Recheck Posted Vendor Ltd",
-      "vendor_number": "RECHECK_POSTED_VENDOR_LTD",
-      "po_date": "2026-06-01",
-      "currency": "INR",
-      "document_subtotal": 10000.0,
-      "tax_amount": 1800.0,
-      "vat_percent": 18.0,
-      "document_total": 11800.0,
-      "amount": 11800.0,
-      "payment_terms": "NET 30",
-      "po_status": "Open",
-      "line_items": [
-        {
-          "line_no": 1,
-          "description": "Posted recheck guardrail",
-          "qty": 10.0,
-          "unit_price": 1000.0,
-          "line_amount": 10000.0
-        }
-      ],
-      "last_modified": "2026-06-29T10:00:00"
-    },
-    {
-      "document_type": "po",
-      "po_number": "PO-CLEAN-NOT-PAID-001",
-      "vendor_name": "Clean Not Paid Vendor Ltd",
-      "vendor_number": "CLEAN_NOT_PAID_VENDOR_LTD",
-      "po_date": "2026-06-01",
-      "currency": "INR",
-      "document_subtotal": 10000.0,
-      "tax_amount": 1800.0,
-      "vat_percent": 18.0,
-      "document_total": 11800.0,
-      "amount": 11800.0,
-      "payment_terms": "NET 30",
-      "po_status": "Open",
-      "line_items": [
-        {
-          "line_no": 1,
-          "description": "Clean posting not paid",
-          "qty": 10.0,
-          "unit_price": 1000.0,
-          "line_amount": 10000.0
-        }
-      ],
-      "last_modified": "2026-06-29T10:00:00"
-    },
-    {
-      "document_type": "po",
-      "po_number": "PO-COMM-001",
-      "vendor_name": "Communication Vendor Ltd",
-      "vendor_number": "COMMUNICATION_VENDOR_LTD",
-      "po_date": "2026-06-01",
-      "currency": "INR",
-      "document_subtotal": 10000.0,
-      "tax_amount": 1800.0,
-      "vat_percent": 18.0,
-      "document_total": 11800.0,
-      "amount": 11800.0,
-      "payment_terms": "NET 30",
-      "po_status": "Open",
-      "line_items": [
-        {
-          "line_no": 1,
-          "description": "Communication test",
-          "qty": 10.0,
-          "unit_price": 1000.0,
-          "line_amount": 10000.0
-        }
-      ],
-      "last_modified": "2026-06-29T10:00:00"
-    },
-    {
-      "document_type": "po",
-      "po_number": "PO-OWNER-001",
-      "vendor_name": "Owner Assignment Vendor Ltd",
-      "vendor_number": "OWNER_ASSIGNMENT_VENDOR_LTD",
-      "po_date": "2026-06-01",
-      "currency": "INR",
-      "document_subtotal": 10000.0,
-      "tax_amount": 1800.0,
-      "vat_percent": 18.0,
-      "document_total": 11800.0,
-      "amount": 11800.0,
-      "payment_terms": "NET 30",
-      "po_status": "Cancelled",
-      "line_items": [
-        {
-          "line_no": 1,
-          "description": "Owner assignment test",
-          "qty": 10.0,
-          "unit_price": 1000.0,
-          "line_amount": 10000.0
-        }
-      ],
-      "last_modified": "2026-06-29T10:00:00"
-    }
+  {
+    "document_type": "po",
+    "po_number": "PO-CLEAN-INR-001",
+    "vendor_name": "Alpha Office Supplies Pvt Ltd",
+    "vendor_number": "V-INR-1001",
+    "po_date": "2026-06-01",
+    "currency": "INR",
+    "document_subtotal": 10000.0,
+    "tax_amount": 1800.0,
+    "vat_percent": 18.0,
+    "document_total": 11800.0,
+    "amount": 11800.0,
+    "payment_terms": "NET 30",
+    "po_status": "Open",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "Office workstation supplies",
+        "qty": 10.0,
+        "unit_price": 1000.0,
+        "line_amount": 10000.0
+      }
+    ],
+    "last_modified": "2026-07-20T10:00:00"
+  },
+  {
+    "document_type": "po",
+    "po_number": "PO-CLEAN-USD-001",
+    "vendor_name": "Northstar Components Inc",
+    "vendor_number": "V-USD-2001",
+    "po_date": "2026-06-02",
+    "currency": "USD",
+    "document_subtotal": 2000.0,
+    "tax_amount": 160.0,
+    "vat_percent": 8.0,
+    "document_total": 2160.0,
+    "amount": 2160.0,
+    "payment_terms": "NET 30",
+    "po_status": "Open",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "Network interface components",
+        "qty": 8.0,
+        "unit_price": 250.0,
+        "line_amount": 2000.0
+      }
+    ],
+    "last_modified": "2026-07-20T10:00:00"
+  },
+  {
+    "document_type": "po",
+    "po_number": "PO-CLEAN-EUR-001",
+    "vendor_name": "EuroTech Services GmbH",
+    "vendor_number": "V-EUR-3001",
+    "po_date": "2026-06-03",
+    "currency": "EUR",
+    "document_subtotal": 2000.0,
+    "tax_amount": 400.0,
+    "vat_percent": 20.0,
+    "document_total": 2400.0,
+    "amount": 2400.0,
+    "payment_terms": "NET 30",
+    "po_status": "Open",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "Technical support services",
+        "qty": 5.0,
+        "unit_price": 400.0,
+        "line_amount": 2000.0
+      }
+    ],
+    "last_modified": "2026-07-20T10:00:00"
+  },
+  {
+    "document_type": "po",
+    "po_number": "PO-CLEAN-GBP-001",
+    "vendor_name": "Britannia Business Solutions Ltd",
+    "vendor_number": "V-GBP-4001",
+    "po_date": "2026-06-04",
+    "currency": "GBP",
+    "document_subtotal": 2000.0,
+    "tax_amount": 400.0,
+    "vat_percent": 20.0,
+    "document_total": 2400.0,
+    "amount": 2400.0,
+    "payment_terms": "NET 30",
+    "po_status": "Open",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "Business process advisory services",
+        "qty": 4.0,
+        "unit_price": 500.0,
+        "line_amount": 2000.0
+      }
+    ],
+    "last_modified": "2026-07-20T10:00:00"
+  },
+  {
+    "document_type": "po",
+    "po_number": "PO-GRN-RECHECK-001",
+    "vendor_name": "Meridian Industrial Supplies Ltd",
+    "vendor_number": "V-INR-5001",
+    "po_date": "2026-06-05",
+    "currency": "INR",
+    "document_subtotal": 9000.0,
+    "tax_amount": 1620.0,
+    "vat_percent": 18.0,
+    "document_total": 10620.0,
+    "amount": 10620.0,
+    "payment_terms": "NET 30",
+    "po_status": "Open",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "Industrial maintenance supplies",
+        "qty": 12.0,
+        "unit_price": 750.0,
+        "line_amount": 9000.0
+      }
+    ],
+    "last_modified": "2026-07-20T10:00:00"
+  },
+  {
+    "document_type": "po",
+    "po_number": "PO-VENDOR-MISMATCH-001",
+    "vendor_name": "Crestline Industrial Supplies Pvt Ltd",
+    "vendor_number": "V-INR-6001",
+    "po_date": "2026-06-06",
+    "currency": "INR",
+    "document_subtotal": 5000.0,
+    "tax_amount": 900.0,
+    "vat_percent": 18.0,
+    "document_total": 5900.0,
+    "amount": 5900.0,
+    "payment_terms": "NET 30",
+    "po_status": "Open",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "Industrial consumables",
+        "qty": 5.0,
+        "unit_price": 1000.0,
+        "line_amount": 5000.0
+      }
+    ],
+    "last_modified": "2026-07-20T10:00:00"
+  },
+  {
+    "document_type": "po",
+    "po_number": "PO-PRICE-MISMATCH-001",
+    "vendor_name": "Precision Procurement Inc",
+    "vendor_number": "V-USD-7001",
+    "po_date": "2026-06-07",
+    "currency": "USD",
+    "document_subtotal": 1000.0,
+    "tax_amount": 80.0,
+    "vat_percent": 8.0,
+    "document_total": 1080.0,
+    "amount": 1080.0,
+    "payment_terms": "NET 30",
+    "po_status": "Open",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "Precision replacement parts",
+        "qty": 10.0,
+        "unit_price": 100.0,
+        "line_amount": 1000.0
+      }
+    ],
+    "last_modified": "2026-07-20T10:00:00"
+  },
+  {
+    "document_type": "po",
+    "po_number": "PO-TAX-MISMATCH-001",
+    "vendor_name": "Taxwise Services Ltd",
+    "vendor_number": "V-GBP-8001",
+    "po_date": "2026-06-08",
+    "currency": "GBP",
+    "document_subtotal": 1000.0,
+    "tax_amount": 200.0,
+    "vat_percent": 20.0,
+    "document_total": 1200.0,
+    "amount": 1200.0,
+    "payment_terms": "NET 30",
+    "po_status": "Open",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "Compliance advisory services",
+        "qty": 5.0,
+        "unit_price": 200.0,
+        "line_amount": 1000.0
+      }
+    ],
+    "last_modified": "2026-07-20T10:00:00"
+  },
+  {
+    "document_type": "po",
+    "po_number": "PO-CLOSED-001",
+    "vendor_name": "Closed Order Supplies Ltd",
+    "vendor_number": "V-EUR-9001",
+    "po_date": "2026-06-09",
+    "currency": "EUR",
+    "document_subtotal": 1200.0,
+    "tax_amount": 240.0,
+    "vat_percent": 20.0,
+    "document_total": 1440.0,
+    "amount": 1440.0,
+    "payment_terms": "NET 30",
+    "po_status": "Closed",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "Archived order supplies",
+        "qty": 4.0,
+        "unit_price": 300.0,
+        "line_amount": 1200.0
+      }
+    ],
+    "last_modified": "2026-07-20T10:00:00"
+  },
+  {
+    "document_type": "po",
+    "po_number": "PO-CANCELLED-001",
+    "vendor_name": "Cancelled Order Vendor Ltd",
+    "vendor_number": "V-INR-10001",
+    "po_date": "2026-06-10",
+    "currency": "INR",
+    "document_subtotal": 3000.0,
+    "tax_amount": 540.0,
+    "vat_percent": 18.0,
+    "document_total": 3540.0,
+    "amount": 3540.0,
+    "payment_terms": "NET 30",
+    "po_status": "Cancelled",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "Cancelled equipment order",
+        "qty": 6.0,
+        "unit_price": 500.0,
+        "line_amount": 3000.0
+      }
+    ],
+    "last_modified": "2026-07-20T10:00:00"
+  },
+  {
+    "document_type": "po",
+    "po_number": "PO-GRN-PENDING-001",
+    "vendor_name": "Pending Receipt Vendor Inc",
+    "vendor_number": "V-USD-11001",
+    "po_date": "2026-06-11",
+    "currency": "USD",
+    "document_subtotal": 1050.0,
+    "tax_amount": 84.0,
+    "vat_percent": 8.0,
+    "document_total": 1134.0,
+    "amount": 1134.0,
+    "payment_terms": "NET 30",
+    "po_status": "Open",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "Pending receipt components",
+        "qty": 7.0,
+        "unit_price": 150.0,
+        "line_amount": 1050.0
+      }
+    ],
+    "last_modified": "2026-07-20T10:00:00"
+  },
+  {
+    "document_type": "po",
+    "po_number": "PO-TERMS-MISMATCH-001",
+    "vendor_name": "Continental Services GmbH",
+    "vendor_number": "V-EUR-12001",
+    "po_date": "2026-06-12",
+    "currency": "EUR",
+    "document_subtotal": 2100.0,
+    "tax_amount": 420.0,
+    "vat_percent": 20.0,
+    "document_total": 2520.0,
+    "amount": 2520.0,
+    "payment_terms": "NET 60",
+    "po_status": "Open",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "Managed support services",
+        "qty": 3.0,
+        "unit_price": 700.0,
+        "line_amount": 2100.0
+      }
+    ],
+    "last_modified": "2026-07-20T10:00:00"
+  },
+  {
+    "document_type": "po",
+    "po_number": "PO-DATE-SEQUENCE-001",
+    "vendor_name": "Chronos Business Systems Ltd",
+    "vendor_number": "V-GBP-13001",
+    "po_date": "2026-06-20",
+    "currency": "GBP",
+    "document_subtotal": 1600.0,
+    "tax_amount": 320.0,
+    "vat_percent": 20.0,
+    "document_total": 1920.0,
+    "amount": 1920.0,
+    "payment_terms": "NET 30",
+    "po_status": "Open",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "Business systems implementation",
+        "qty": 2.0,
+        "unit_price": 800.0,
+        "line_amount": 1600.0
+      }
+    ],
+    "last_modified": "2026-07-20T10:00:00"
+  },
+  {
+    "document_type": "po",
+    "po_number": "PO-CURRENCY-MISMATCH-001",
+    "vendor_name": "Global Currency Services Inc",
+    "vendor_number": "V-USD-14001",
+    "po_date": "2026-06-13",
+    "currency": "USD",
+    "document_subtotal": 1500.0,
+    "tax_amount": 120.0,
+    "vat_percent": 8.0,
+    "document_total": 1620.0,
+    "amount": 1620.0,
+    "payment_terms": "NET 30",
+    "po_status": "Open",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "Cross-border support services",
+        "qty": 5.0,
+        "unit_price": 300.0,
+        "line_amount": 1500.0
+      }
+    ],
+    "last_modified": "2026-07-20T10:00:00"
+  },
+  {
+    "document_type": "po",
+    "po_number": "PO-MASTER-CURRENCY-001",
+    "vendor_name": "Intercontinental Trade Ltd",
+    "vendor_number": "V-USD-15001",
+    "po_date": "2026-06-14",
+    "currency": "USD",
+    "document_subtotal": 1500.0,
+    "tax_amount": 120.0,
+    "vat_percent": 8.0,
+    "document_total": 1620.0,
+    "amount": 1620.0,
+    "payment_terms": "NET 30",
+    "po_status": "Open",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "International trade services",
+        "qty": 6.0,
+        "unit_price": 250.0,
+        "line_amount": 1500.0
+      }
+    ],
+    "last_modified": "2026-07-20T10:00:00"
+  },
+  {
+    "document_type": "po",
+    "po_number": "PO-QTY-INSUFFICIENT-001",
+    "vendor_name": "Quantity Control Supplies Ltd",
+    "vendor_number": "V-INR-16001",
+    "po_date": "2026-06-15",
+    "currency": "INR",
+    "document_subtotal": 4000.0,
+    "tax_amount": 720.0,
+    "vat_percent": 18.0,
+    "document_total": 4720.0,
+    "amount": 4720.0,
+    "payment_terms": "NET 30",
+    "po_status": "Open",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "Quantity-controlled supplies",
+        "qty": 10.0,
+        "unit_price": 400.0,
+        "line_amount": 4000.0
+      }
+    ],
+    "last_modified": "2026-07-20T10:00:00"
+  },
+  {
+    "document_type": "po",
+    "po_number": "PO-CONSUMPTION-001",
+    "vendor_name": "Cumulative Billing Services Ltd",
+    "vendor_number": "V-GBP-17001",
+    "po_date": "2026-06-16",
+    "currency": "GBP",
+    "document_subtotal": 1000.0,
+    "tax_amount": 200.0,
+    "vat_percent": 20.0,
+    "document_total": 1200.0,
+    "amount": 1200.0,
+    "payment_terms": "NET 30",
+    "po_status": "Open",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "Monthly managed service units",
+        "qty": 10.0,
+        "unit_price": 100.0,
+        "line_amount": 1000.0
+      }
+    ],
+    "last_modified": "2026-07-20T10:00:00"
+  },
+  {
+    "document_type": "po",
+    "po_number": "PO-DUPLICATE-001",
+    "vendor_name": "Duplicate Control GmbH",
+    "vendor_number": "V-EUR-18001",
+    "po_date": "2026-06-17",
+    "currency": "EUR",
+    "document_subtotal": 1500.0,
+    "tax_amount": 300.0,
+    "vat_percent": 20.0,
+    "document_total": 1800.0,
+    "amount": 1800.0,
+    "payment_terms": "NET 30",
+    "po_status": "Open",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "Duplicate prevention services",
+        "qty": 3.0,
+        "unit_price": 500.0,
+        "line_amount": 1500.0
+      }
+    ],
+    "last_modified": "2026-07-20T10:00:00"
+  },
+  {
+    "document_type": "po",
+    "po_number": "PO-TOTAL-ARITHMETIC-001",
+    "vendor_name": "Arithmetic Controls Inc",
+    "vendor_number": "V-USD-19001",
+    "po_date": "2026-06-18",
+    "currency": "USD",
+    "document_subtotal": 2000.0,
+    "tax_amount": 160.0,
+    "vat_percent": 8.0,
+    "document_total": 2160.0,
+    "amount": 2160.0,
+    "payment_terms": "NET 30",
+    "po_status": "Open",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "Financial control services",
+        "qty": 4.0,
+        "unit_price": 500.0,
+        "line_amount": 2000.0
+      }
+    ],
+    "last_modified": "2026-07-20T10:00:00"
+  },
+  {
+    "document_type": "po",
+    "po_number": "PO-MULTI-GRN-001",
+    "vendor_name": "Split Delivery Systems Inc",
+    "vendor_number": "V-USD-20001",
+    "po_date": "2026-06-19",
+    "currency": "USD",
+    "document_subtotal": 1000.0,
+    "tax_amount": 80.0,
+    "vat_percent": 8.0,
+    "document_total": 1080.0,
+    "amount": 1080.0,
+    "payment_terms": "NET 30",
+    "po_status": "Open",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "Split-delivery equipment",
+        "qty": 10.0,
+        "unit_price": 100.0,
+        "line_amount": 1000.0
+      }
+    ],
+    "last_modified": "2026-07-20T10:00:00"
+  },
+  {
+    "document_type": "po",
+    "po_number": "PO-PARTIAL-STATUS-001",
+    "vendor_name": "Partial Delivery Supplies Pvt Ltd",
+    "vendor_number": "V-INR-21001",
+    "po_date": "2026-06-20",
+    "currency": "INR",
+    "document_subtotal": 3000.0,
+    "tax_amount": 540.0,
+    "vat_percent": 18.0,
+    "document_total": 3540.0,
+    "amount": 3540.0,
+    "payment_terms": "NET 30",
+    "po_status": "Partial",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "Partially fulfilled supplies",
+        "qty": 5.0,
+        "unit_price": 600.0,
+        "line_amount": 3000.0
+      }
+    ],
+    "last_modified": "2026-07-20T10:00:00"
+  },
+  {
+    "document_type": "po",
+    "po_number": "PO-DUE-DATE-001",
+    "vendor_name": "Calendar Terms Ltd",
+    "vendor_number": "V-GBP-22001",
+    "po_date": "2026-06-21",
+    "currency": "GBP",
+    "document_subtotal": 2000.0,
+    "tax_amount": 400.0,
+    "vat_percent": 20.0,
+    "document_total": 2400.0,
+    "amount": 2400.0,
+    "payment_terms": "NET 30",
+    "po_status": "Open",
+    "line_items": [
+      {
+        "line_no": 1,
+        "description": "Calendar and scheduling services",
+        "qty": 2.0,
+        "unit_price": 1000.0,
+        "line_amount": 2000.0
+      }
+    ],
+    "last_modified": "2026-07-20T10:00:00"
+  }
 ]

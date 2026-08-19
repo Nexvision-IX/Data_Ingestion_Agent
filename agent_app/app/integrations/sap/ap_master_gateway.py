@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import json
-import re
 import sys
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy import String, cast, func, select
-from sqlalchemy.engine import Connection
+from sqlalchemy.engine import Connection, Engine
 
 from app.integrations.sap.base import SAPGateway
 from app.models import Invoice
@@ -20,19 +19,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[4]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-from ap_database.engines import get_master_engine
 from ap_database.master_models import (
     InvoiceMaster,
     SapGRNMaster,
     SapPOMaster,
 )
-from ap_database.master_repository import init_master_schema_if_needed
-
-
-def _vendor_key(value: str | None) -> str:
-    value = value or "UNKNOWN_VENDOR"
-    cleaned = re.sub(r"[^A-Za-z0-9]+", "_", value.upper()).strip("_")
-    return cleaned[:50] or "UNKNOWN_VENDOR"
+from ap_database.workflow_master_repository import WorkflowMasterRepository
 
 
 def _load_items(items_json: Any) -> list[dict[str, Any]]:
@@ -70,14 +62,27 @@ def _first_non_empty(*values: Any) -> Any:
 class APMasterGateway(SAPGateway):
     """Read AP master context through the configured shared database engine."""
 
-    def __init__(self, path: Path | None = None):
+    def __init__(
+        self,
+        path: Path | None = None,
+        *,
+        master_repository: WorkflowMasterRepository | None = None,
+        master_engine: Engine | None = None,
+    ):
         # ``path`` is accepted only for compatibility with older callers.
-        # Connections now always come from MASTER_DATABASE_URL/DATABASE_URL.
+        # Connections come from the workflow-scoped injected dependency.
         del path
+        if master_repository is None and master_engine is None:
+            raise ValueError(
+                "APMasterGateway requires the workflow's supplied "
+                "master_repository or master_engine."
+            )
+        self.master_repository = master_repository or WorkflowMasterRepository(
+            master_engine
+        )
 
     def _connect(self) -> Connection:
-        init_master_schema_if_needed()
-        return get_master_engine().connect()
+        return self.master_repository.connect()
 
     def get_invoice_context(self, invoice: Invoice) -> dict[str, Any]:
         with self._connect() as connection:
@@ -156,7 +161,6 @@ class APMasterGateway(SAPGateway):
         vendor_number = _first_non_empty(
             row.get("vendor_number"),
             raw_json.get("vendor_number"),
-            _vendor_key(vendor_name),
         )
         payment_terms = _first_non_empty(
             row.get("payment_terms"),
@@ -183,6 +187,13 @@ class APMasterGateway(SAPGateway):
             "status": raw_status,
             "raw_status": raw_status,
             "items": items,
+            "raw_json": raw_json,
+            "tax_id": _first_non_empty(
+                raw_json.get("tax_id"),
+                raw_json.get("tax_number"),
+                raw_json.get("gstin"),
+                raw_json.get("vat_number"),
+            ),
         })
 
     def _get_grns(
@@ -198,9 +209,13 @@ class APMasterGateway(SAPGateway):
             select(
                 table.c.gr_number,
                 table.c.po_number,
+                table.c.vendor_name,
+                table.c.vendor_number,
                 cast(table.c.gr_date, String).label("gr_date"),
+                table.c.currency,
                 table.c.gr_status,
                 table.c.items_json,
+                table.c.raw_json,
             )
             .where(table.c.po_number == po_number)
             .order_by(table.c.gr_number.asc())
@@ -211,6 +226,7 @@ class APMasterGateway(SAPGateway):
         for row in rows:
             raw_items = _load_items(row.get("items_json"))
             raw_status = row.get("gr_status")
+            raw_json = _load_object(row.get("raw_json"))
             for idx, item in enumerate(raw_items, start=1):
                 line_no = item.get("line_no") or idx
                 output.append(normalize_grn(
@@ -218,10 +234,15 @@ class APMasterGateway(SAPGateway):
                         "grn_number": row.get("gr_number"),
                         "po_number": row.get("po_number"),
                         "gr_date": row.get("gr_date"),
+                        "receipt_date": row.get("gr_date"),
+                        "vendor_name": row.get("vendor_name"),
+                        "vendor_number": row.get("vendor_number"),
+                        "currency": row.get("currency"),
                         "po_item": f"{int(line_no):05d}",
                         "received_quantity": float(item.get("qty") or 0),
                         "status": raw_status,
                         "raw_status": raw_status,
+                        "raw_json": raw_json,
                     }
                 ))
 

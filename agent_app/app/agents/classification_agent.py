@@ -16,6 +16,7 @@ The output must follow the supplied JSON schema exactly.
 
 
 RULE_PRIORITY = {
+    "OCR-008": ("OCR_LOW_CONFIDENCE", "HIGH", "AP_OCR_REVIEW"),
     "AP-001": ("PO_NOT_FOUND", "HIGH", "PROCUREMENT"),
     "AP-009": ("DUPLICATE_INVOICE", "CRITICAL", "AP"),
     "DUP-001": ("DUPLICATE_INVOICE", "CRITICAL", "AP"),
@@ -47,13 +48,14 @@ RULE_PRIORITY = {
     "PAY-005": ("PAYMENT_TERMS_MISMATCH", "HIGH", "AP"),
     "AP-010": ("PAYMENT_TERMS_MISMATCH", "MEDIUM", "AP"),
     "DATE-001": ("DATE_POLICY_EXCEPTION", "HIGH", "AP"),
-    "DATE-002": ("DATE_POLICY_EXCEPTION", "HIGH", "AP"),
-    "DATE-003": ("DATE_POLICY_EXCEPTION", "HIGH", "AP"),
+    "DATE-002": ("DATE_SEQUENCE_ERROR", "HIGH", "AP"),
+    "DATE-003": ("DATE_SEQUENCE_ERROR", "HIGH", "AP"),
     "DATE-004": ("DATE_POLICY_EXCEPTION", "HIGH", "AP"),
     "DATE-005": ("DATE_POLICY_EXCEPTION", "HIGH", "AP"),
 }
 
 PRIMARY_RULE_ORDER = [
+    "OCR-008",
     "AP-001",
     "AP-009",
     "DUP-001",
@@ -63,6 +65,7 @@ PRIMARY_RULE_ORDER = [
     "PO-001",
     "AP-004",
     "VND-003",
+    "AP-005",
     "AP-006",
     "GRN-001",
     "AP-007",
@@ -115,6 +118,31 @@ class ClassificationAgent:
         failed_validations: list[dict],
     ) -> ClassificationOutput:
         primary = select_primary_failed_validation(failed_validations)
+        if primary and primary.get("rule_code") == "AP-005":
+            category = (
+                (primary.get("details") or {}).get("category")
+                or "CURRENCY_MISMATCH"
+            )
+            return ClassificationOutput(
+                category=category,
+                confidence=1.0,
+                rationale=primary.get("message") or category,
+                priority="HIGH",
+                owner_team="AP",
+            )
+        if (
+            primary
+            and primary.get("rule_code") in {"AP-004", "VND-003"}
+            and (primary.get("details") or {}).get("vendor_match_status")
+            == "MANUAL_REVIEW"
+        ):
+            return ClassificationOutput(
+                category="MANUAL_REVIEW",
+                confidence=1.0,
+                rationale=primary.get("message") or "Controlled vendor review.",
+                priority="HIGH",
+                owner_team="AP",
+            )
         if primary and primary.get("rule_code") in RULE_PRIORITY:
             category, priority, owner = RULE_PRIORITY[primary["rule_code"]]
             return ClassificationOutput(

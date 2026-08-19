@@ -5,6 +5,11 @@ from typing import Any
 
 from app.config import settings
 from app.models import Invoice
+from app.services.currency_resolution_service import resolve_currency
+from app.services.vendor_identity_service import resolve_vendor_identity
+from app.services.extraction_confidence_service import (
+    low_confidence_mandatory_fields,
+)
 
 
 @dataclass
@@ -35,7 +40,6 @@ class APValidationEngine:
         po = normalize_po(context.get("po"))
         from app.services.vendor_master_control import (
             VendorMasterControl,
-            normalize_vendor_identity,
             normalize_vendor,
         )
 
@@ -51,6 +55,42 @@ class APValidationEngine:
             for item in context.get("grns", [])
         ]
         history = context.get("invoice_history", [])
+        low_mandatory_fields = low_confidence_mandatory_fields(
+            invoice.extraction_field_confidence
+        )
+        confidence_ok = (
+            invoice.extraction_confidence is not None
+            and 0 <= invoice.extraction_confidence <= 1
+            and invoice.extraction_confidence
+            >= settings.extraction_auto_processing_threshold
+            and not low_mandatory_fields
+        )
+        results.append(
+            RuleResult(
+                "OCR-008",
+                "Extraction confidence permits automatic processing",
+                confidence_ok,
+                "ERROR",
+                (
+                    "Extraction confidence permits deterministic processing."
+                    if confidence_ok
+                    else "OCR_LOW_CONFIDENCE"
+                ),
+                {
+                    "category": (
+                        None if confidence_ok else "OCR_LOW_CONFIDENCE"
+                    ),
+                    "confidence": invoice.extraction_confidence,
+                    "auto_processing_threshold": (
+                        settings.extraction_auto_processing_threshold
+                    ),
+                    "review_status": invoice.extraction_review_status,
+                    "low_confidence_mandatory_fields": (
+                        low_mandatory_fields
+                    ),
+                },
+            )
+        )
 
         results.append(
             RuleResult(
@@ -74,13 +114,13 @@ class APValidationEngine:
         results.append(
             RuleResult(
                 "AP-002",
-                "Vendor exists",
+                "PO supplier context exists",
                 vendor is not None,
                 "ERROR",
                 (
-                    "Vendor found."
+                    "PO supplier context found."
                     if vendor
-                    else "Vendor was not found."
+                    else "PO supplier context was not found."
                 ),
                 {"vendor_number": invoice.vendor_number},
             )
@@ -93,7 +133,7 @@ class APValidationEngine:
         results.append(
             RuleResult(
                 "AP-003",
-                "Vendor is active",
+                "PO supplier is active for payment",
                 vendor_active,
                 "ERROR",
                 (
@@ -111,102 +151,77 @@ class APValidationEngine:
             )
         )
 
-        normalized_invoice_vendor_number = normalize_vendor_identity(
-            invoice.vendor_number
+        vendor_resolution = resolve_vendor_identity(
+            invoice_supplier_name=invoice.vendor_name,
+            extracted_vendor_number=invoice.extracted_vendor_number,
+            invoice_evidence=invoice.extraction_raw,
+            po=po,
+            grns=grns,
         )
-        normalized_po_vendor_number = normalize_vendor_identity(
-            po.get("vendor_number") if po else None
+        invoice.resolved_vendor_number = (
+            vendor_resolution.resolved_vendor_number
         )
-        normalized_invoice_vendor_name = normalize_vendor_identity(
-            invoice.vendor_name
-        )
-        normalized_po_vendor_name = normalize_vendor_identity(
-            po.get("vendor_name") if po else None
-        )
-        if (
-            bool(normalized_invoice_vendor_number)
-            and bool(normalized_po_vendor_number)
-        ):
-            vendor_match = (
-                bool(po)
-                and normalized_invoice_vendor_number
-                == normalized_po_vendor_number
-            )
-        else:
-            vendor_match = (
-                bool(po)
-                and bool(normalized_invoice_vendor_name)
-                and bool(normalized_po_vendor_name)
-                and normalized_invoice_vendor_name
-                == normalized_po_vendor_name
-            )
+        invoice.vendor_match_method = vendor_resolution.method
+        invoice.vendor_match_status = vendor_resolution.status
+        invoice.vendor_match_evidence = vendor_resolution.evidence
         results.append(
             RuleResult(
                 "AP-004",
-                "PO vendor matches invoice",
-                vendor_match,
+                "Invoice supplier identity matches PO supplier",
+                vendor_resolution.matched,
                 "ERROR",
                 (
                     "PO vendor matches."
-                    if vendor_match
-                    else "PO vendor does not match invoice vendor."
+                    if vendor_resolution.matched
+                    else "Invoice supplier does not match the PO supplier."
                 ),
-                {
-                    "invoice_vendor": invoice.vendor_number,
-                    "po_vendor": (
-                        po.get("vendor_number")
-                        if po
-                        else None
-                    ),
-                    "invoice_vendor_name": invoice.vendor_name,
-                    "po_vendor_name": (
-                        po.get("vendor_name")
-                        if po
-                        else None
-                    ),
-                    "normalized_invoice_vendor_number": (
-                        normalized_invoice_vendor_number
-                    ),
-                    "normalized_po_vendor_number": (
-                        normalized_po_vendor_number
-                    ),
-                    "normalized_invoice_vendor_name": (
-                        normalized_invoice_vendor_name
-                    ),
-                    "normalized_po_vendor_name": (
-                        normalized_po_vendor_name
+                vendor_resolution.evidence | {
+                    "vendor_match_status": vendor_resolution.status,
+                    "resolved_vendor_number": (
+                        vendor_resolution.resolved_vendor_number
                     ),
                 },
             )
         )
 
         results.extend(
-            VendorMasterControl().evaluate(invoice, vendor, po)
+            VendorMasterControl().evaluate(invoice, vendor, po, grns)
         )
 
-        currency_match = (
-            bool(po)
-            and po.get("currency")
-            == invoice.currency
+        currency_resolution = resolve_currency(
+            (
+                invoice.extracted_currency
+                if invoice.extracted_currency is not None
+                else invoice.currency
+            ),
+            po,
+            grns,
+            allow_master_data_inference=(
+                settings.allow_master_data_currency_inference
+            ),
         )
+        invoice.resolved_currency = currency_resolution.resolved_currency
+        invoice.currency = currency_resolution.resolved_currency
+        invoice.currency_resolution_method = currency_resolution.method
+        invoice.currency_resolution_evidence = currency_resolution.evidence
         results.append(
             RuleResult(
                 "AP-005",
-                "Currency matches",
-                currency_match,
+                currency_resolution.category or "CURRENCY_MATCH",
+                currency_resolution.passed,
                 "ERROR",
                 (
                     "Currency matches."
-                    if currency_match
-                    else "Invoice and PO currencies differ."
+                    if currency_resolution.passed
+                    else (
+                        currency_resolution.category
+                        or "Currency validation failed."
+                    )
                 ),
-                {
-                    "invoice_currency": invoice.currency,
-                    "po_currency": (
-                        po.get("currency")
-                        if po
-                        else None
-                    ),
+                currency_resolution.evidence | {
+                    "category": currency_resolution.category,
+                    "resolved_currency": currency_resolution.resolved_currency,
+                    "resolution_method": currency_resolution.method,
                 },
             )
         )

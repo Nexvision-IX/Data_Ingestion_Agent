@@ -83,12 +83,47 @@ class Settings:
     min_extraction_confidence: float = float(
         os.getenv("MIN_EXTRACTION_CONFIDENCE", "0.80")
     )
+    extraction_auto_processing_threshold: float = float(
+        os.getenv(
+            "OCR_AUTO_PROCESS_THRESHOLD",
+            os.getenv("EXTRACTION_AUTO_PROCESSING_THRESHOLD", "0.90"),
+        )
+    )
+    extraction_enhanced_retry_threshold: float = float(
+        os.getenv(
+            "OCR_RETRY_THRESHOLD",
+            os.getenv("EXTRACTION_ENHANCED_RETRY_THRESHOLD", "0.70"),
+        )
+    )
+    extraction_manual_review_threshold: float = float(
+        os.getenv("EXTRACTION_MANUAL_REVIEW_THRESHOLD", "0.70")
+    )
+    date_order: str = os.getenv("DATE_ORDER", "DMY").strip().upper()
+    allow_master_data_currency_inference: bool = _bool(
+        "ALLOW_MASTER_DATA_CURRENCY_INFERENCE",
+        False,
+    )
     extraction_reconciliation_tolerance: float = float(
         os.getenv("EXTRACTION_RECONCILIATION_TOLERANCE", "0.01")
     )
     extraction_max_retry_attempts: int = int(
-        os.getenv("EXTRACTION_MAX_RETRY_ATTEMPTS", "1")
+        os.getenv(
+            "OCR_MAX_RETRIES",
+            os.getenv("EXTRACTION_MAX_RETRY_ATTEMPTS", "1"),
+        )
     )
+
+    @property
+    def ocr_auto_process_threshold(self) -> float:
+        return self.extraction_auto_processing_threshold
+
+    @property
+    def ocr_retry_threshold(self) -> float:
+        return self.extraction_enhanced_retry_threshold
+
+    @property
+    def ocr_max_retries(self) -> int:
+        return self.extraction_max_retry_attempts
 
     llm_provider: str = os.getenv("LLM_PROVIDER", "mock").lower()
     llm_api_key: str = os.getenv("LLM_API_KEY", "")

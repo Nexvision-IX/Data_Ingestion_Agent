@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from app.models import Invoice
@@ -11,15 +10,9 @@ from app.services.status_catalog_service import (
 )
 
 
-_NON_ALPHANUMERIC = re.compile(r"[^A-Z0-9]+")
-_COMPANY_SUFFIX_ALIASES = {
-    "LIMITED": "LTD",
-}
-_LEADING_LABELS = (
-    ("SUPPLIER", "NAME"),
-    ("VENDOR", "NAME"),
-    ("SUPPLIER",),
-    ("VENDOR",),
+from app.services.vendor_identity_service import (
+    normalize_supplier_name,
+    resolve_vendor_identity,
 )
 
 _TAX_FIELDS = ("tax_id", "tax_number", "gstin", "vat_number")
@@ -32,25 +25,8 @@ _PAYMENT_FIELDS = (
 
 
 def normalize_vendor_identity(value: Any) -> str:
-    raw = str(value or "").strip().upper()
-    if not raw:
-        return ""
-
-    tokens = [
-        token
-        for token in _NON_ALPHANUMERIC.sub(" ", raw).split()
-        if token
-    ]
-    for label in _LEADING_LABELS:
-        if tuple(tokens[:len(label)]) == label:
-            tokens = tokens[len(label):]
-            break
-
-    normalized_tokens = [
-        _COMPANY_SUFFIX_ALIASES.get(token, token)
-        for token in tokens
-    ]
-    return "".join(normalized_tokens)
+    """Backward-compatible alias for supplier-name normalization."""
+    return normalize_supplier_name(value).replace(" ", "")
 
 
 def normalize_vendor(
@@ -78,27 +54,34 @@ class VendorMasterControl:
         invoice: Invoice,
         vendor: dict[str, Any] | None,
         po: dict[str, Any] | None,
+        grns: list[dict[str, Any]] | None = None,
     ) -> list[RuleResult]:
         vendor = normalize_vendor(vendor)
         exists = vendor is not None
         active = exists and vendor.get("status") == "ACTIVE"
-        identity_matches, identity_details = self._identity_match(
-            invoice,
-            vendor,
-            po,
+        resolution = resolve_vendor_identity(
+            invoice_supplier_name=invoice.vendor_name,
+            extracted_vendor_number=invoice.extracted_vendor_number,
+            invoice_evidence=invoice.extraction_raw,
+            po=po,
+            grns=grns,
         )
+        invoice.resolved_vendor_number = resolution.resolved_vendor_number
+        invoice.vendor_match_method = resolution.method
+        invoice.vendor_match_status = resolution.status
+        invoice.vendor_match_evidence = resolution.evidence
         completeness = self._completeness(vendor)
 
         return [
             RuleResult(
                 rule_code="VND-001",
-                rule_name="Vendor exists in vendor master or context",
+                rule_name="PO supplier context exists",
                 passed=exists,
                 severity="ERROR",
                 message=(
-                    "Vendor context was found."
+                    "PO supplier context was found."
                     if exists
-                    else "Vendor context was not found."
+                    else "PO supplier context was not found."
                 ),
                 details={
                     "vendor_number": (
@@ -133,21 +116,21 @@ class VendorMasterControl:
             ),
             RuleResult(
                 rule_code="VND-003",
-                rule_name=(
-                    "Invoice vendor matches PO and vendor master identity"
-                ),
-                passed=identity_matches,
+                rule_name="Invoice supplier identity matches PO supplier",
+                passed=resolution.matched,
                 severity="ERROR",
                 message=(
-                    "Invoice vendor identity matches the available master "
-                    "and PO identity."
-                    if identity_matches
+                    "Invoice supplier identity matches the PO supplier."
+                    if resolution.matched
                     else (
-                        "Invoice vendor identity does not match the "
-                        "available master or PO identity."
+                        "Invoice supplier identity requires review or does "
+                        "not match the PO supplier."
                     )
                 ),
-                details=identity_details,
+                details=resolution.evidence | {
+                    "vendor_match_status": resolution.status,
+                    "resolved_vendor_number": resolution.resolved_vendor_number,
+                },
             ),
             RuleResult(
                 rule_code="VND-004",
@@ -165,72 +148,6 @@ class VendorMasterControl:
                 details=completeness,
             ),
         ]
-
-    @staticmethod
-    def _identity_match(
-        invoice: Invoice,
-        vendor: dict[str, Any] | None,
-        po: dict[str, Any] | None,
-    ) -> tuple[bool, dict[str, Any]]:
-        invoice_number = normalize_vendor_identity(
-            invoice.vendor_number
-        )
-        invoice_name = normalize_vendor_identity(invoice.vendor_name)
-        comparisons = []
-
-        for source, record in (("vendor", vendor), ("po", po)):
-            if not record:
-                comparisons.append(
-                    {
-                        "source": source,
-                        "available": False,
-                        "matched": False,
-                    }
-                )
-                continue
-
-            reference_number = normalize_vendor_identity(
-                record.get("vendor_number")
-            )
-            reference_name = normalize_vendor_identity(
-                record.get("vendor_name")
-            )
-            if invoice_number and reference_number:
-                matched = invoice_number == reference_number
-                method = "vendor_number"
-            elif invoice_name and reference_name:
-                matched = invoice_name == reference_name
-                method = "vendor_name"
-            else:
-                matched = False
-                method = "identity_unavailable"
-
-            comparisons.append(
-                {
-                    "source": source,
-                    "available": True,
-                    "matched": matched,
-                    "method": method,
-                    "reference_vendor_number": record.get(
-                        "vendor_number"
-                    ),
-                    "reference_vendor_name": record.get("vendor_name"),
-                }
-            )
-
-        comparable = [
-            comparison
-            for comparison in comparisons
-            if comparison.get("available")
-        ]
-        passed = vendor is not None and bool(comparable) and all(
-            comparison["matched"] for comparison in comparable
-        )
-        return passed, {
-            "invoice_vendor_number": invoice.vendor_number,
-            "invoice_vendor_name": invoice.vendor_name,
-            "comparisons": comparisons,
-        }
 
     @staticmethod
     def _completeness(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import sys
-from datetime import date, datetime
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -13,14 +13,15 @@ from sqlalchemy.orm import Session
 
 from app.models import Invoice
 from app.rules.validation import RuleResult
+from app.services.date_normalization_service import normalize_date
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-from ap_database.engines import get_master_engine
 from ap_database.master_models import InvoiceMaster, SapPostedInvoiceMaster
+from ap_database.workflow_master_repository import WorkflowMasterRepository
 
 
 POSSIBLE_DUPLICATE_DATE_WINDOW_DAYS = 7
@@ -54,16 +55,7 @@ def _amount(value: Any) -> Decimal | None:
 
 
 def _date(value: Any) -> date | None:
-    if value is None or value == "":
-        return None
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    try:
-        return date.fromisoformat(str(value)[:10])
-    except ValueError:
-        return None
+    return normalize_date(value).normalized_date
 
 
 class DuplicateInvoiceControl:
@@ -71,9 +63,18 @@ class DuplicateInvoiceControl:
         self,
         db: Session,
         master_engine: Engine | None = None,
+        master_repository: WorkflowMasterRepository | None = None,
     ):
         self.db = db
-        self.master_engine = master_engine
+        if master_repository is None and master_engine is None:
+            raise ValueError(
+                "DuplicateInvoiceControl requires the workflow's supplied "
+                "master_repository or master_engine."
+            )
+        self.master_repository = master_repository or WorkflowMasterRepository(
+            master_engine
+        )
+        self.master_engine = self.master_repository.engine
 
     def evaluate(self, invoice: Invoice) -> list[RuleResult]:
         current = self._current_invoice(invoice)
@@ -149,7 +150,7 @@ class DuplicateInvoiceControl:
         ]
 
     def _connect_master(self):
-        return (self.master_engine or get_master_engine()).connect()
+        return self.master_repository.connect()
 
     def _current_invoice(self, invoice: Invoice) -> dict[str, Any]:
         return self._candidate(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from sqlalchemy import Engine, create_engine
+from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import sessionmaker
 
 from ap_database.settings import is_postgres_url, settings
@@ -24,7 +24,17 @@ def _create_database_engine(url: str) -> Engine:
     elif url.startswith("sqlite"):
         options["connect_args"] = {"check_same_thread": False}
 
-    return create_engine(url, **options)
+    engine = create_engine(url, **options)
+    if url.startswith("sqlite"):
+        @event.listens_for(engine, "connect")
+        def _enable_sqlite_foreign_keys(
+            dbapi_connection,
+            _connection_record,
+        ):
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+    return engine
 
 
 @lru_cache(maxsize=1)

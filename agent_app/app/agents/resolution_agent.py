@@ -83,6 +83,10 @@ RESOLUTION_MAP = {
         "Ask AP, Procurement, and Receiving to verify invoice, PO, and "
         "GRN dates and accounting-period treatment before posting."
     ),
+    "DATE_SEQUENCE_ERROR": (
+        "Verify normalized PO, invoice, receipt, and due dates; correct "
+        "the authoritative source date before revalidation."
+    ),
     "TAX_MISMATCH": (
         "Ask AP, Tax, and Procurement to verify tax rate, tax amount, "
         "tax code, and PO tax treatment before posting."

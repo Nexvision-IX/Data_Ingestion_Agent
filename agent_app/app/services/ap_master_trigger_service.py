@@ -4,7 +4,7 @@ import json
 import re
 import sys
 import traceback
-from datetime import date, datetime
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
@@ -16,14 +16,22 @@ from sqlalchemy.orm import Session
 from app.models import (
     Communication,
     ExceptionCase,
+    ExtractionAttempt,
     Invoice,
     InvoiceLine,
+    POGRNConsumptionLedger,
     PostingAttempt,
     ValidationResult,
     WorkflowEvent,
 )
 from app.integrations.llm.mock import MockLLMClient
 from app.services.extraction_quality_service import ExtractionQualityService
+from app.services.date_normalization_service import normalize_date
+from app.services.extraction_confidence_service import (
+    evaluate_confidence,
+)
+from app.services.currency_resolution_service import normalize_currency_value
+from app.services.vendor_identity_service import normalize_supplier_name
 from app.services.serializers import make_json_safe
 from app.services.po_grn_consumption_ledger_service import (
     POGRNConsumptionLedgerService,
@@ -42,7 +50,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from ap_database.engines import get_master_engine
 from ap_database.master_models import InvoiceMaster, SapPostedInvoiceMaster
-from ap_database.master_repository import init_master_schema_if_needed
+from ap_database.extraction_confidence import (
+    canonicalize_extraction_confidence,
+)
+from ap_database.workflow_master_repository import WorkflowMasterRepository
 
 
 SAFE_REPROCESS_STATUSES = frozenset(
@@ -84,55 +95,6 @@ class DuplicateAgentInvoiceError(RuntimeError):
 
 class ReprocessExecutionError(RuntimeError):
     pass
-
-
-def _vendor_key(value: str | None) -> str:
-    value = value or "UNKNOWN_VENDOR"
-    cleaned = re.sub(r"[^A-Za-z0-9]+", "_", value.upper()).strip("_")
-    return cleaned[:50] or "UNKNOWN_VENDOR"
-
-
-def _parse_date(value: Any) -> date:
-    if not value:
-        return date.today()
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-
-    raw_value = str(value).strip()
-    if not raw_value:
-        return date.today()
-
-    try:
-        return date.fromisoformat(raw_value[:10])
-    except ValueError:
-        pass
-
-    # Legacy SQLite rows may contain slash-separated dates. Values where one
-    # component exceeds 12 are unambiguous; ambiguous values retain the demo's
-    # US-style month/day interpretation while the original text remains in the
-    # source JSON for traceability.
-    parts = raw_value.split("/")
-    formats = ("%m/%d/%Y", "%d/%m/%Y")
-    if len(parts) == 3:
-        try:
-            first, second = int(parts[0]), int(parts[1])
-            if first > 12:
-                formats = ("%d/%m/%Y",)
-            elif second > 12:
-                formats = ("%m/%d/%Y",)
-        except ValueError:
-            pass
-
-    for date_format in formats:
-        try:
-            return datetime.strptime(raw_value, date_format).date()
-        except ValueError:
-            continue
-
-    # Preserve the previous local-demo fallback for unknown date formats.
-    return date.today()
 
 
 def _load_json(value: Any, default):
@@ -214,13 +176,52 @@ def _vendor_number_from_row(
     row: dict[str, Any],
     raw_json: Any,
     vendor_name: str,
-) -> str:
+) -> tuple[str | None, dict[str, Any]]:
     raw_json = raw_json if isinstance(raw_json, dict) else {}
-    return _first_non_empty(
+    candidate = _first_non_empty(
         row.get("vendor_number"),
         raw_json.get("vendor_number"),
-        _vendor_key(vendor_name),
     )
+    normalized_name_key = normalize_supplier_name(vendor_name).replace(
+        " ", "_"
+    )
+    raw_name_key = re.sub(
+        r"[^A-Z0-9]+", "_", str(vendor_name).upper()
+    ).strip("_")
+    synthetic = (
+        bool(candidate)
+        and str(candidate).strip().upper()
+        in {normalized_name_key, raw_name_key}
+        and not raw_json.get("vendor_number_genuinely_extracted", False)
+    )
+    evidence = {
+        "legacy_vendor_number": candidate if synthetic else None,
+        "legacy_vendor_number_trusted": not synthetic,
+        "reason": (
+            "Name-derived legacy value retained only as audit evidence."
+            if synthetic else None
+        ),
+    }
+    return (None if synthetic else candidate), evidence
+
+
+def _confidence_metadata(raw_json: dict[str, Any]) -> dict[str, Any]:
+    canonical = canonicalize_extraction_confidence(raw_json)
+    return {
+        "confidence": canonical.extraction_confidence,
+        "source": canonical.confidence_source,
+        "supplied": canonical.confidence_supplied,
+        "field_confidence": canonical.field_confidence,
+        "warnings": canonical.warnings,
+        "ocr_provider": canonical.ocr_provider,
+        "ocr_version": canonical.ocr_version,
+        "provider": canonical.extraction_provider,
+        "model": canonical.extraction_model,
+        "version": canonical.extraction_version,
+        "attempt_number": canonical.attempt_number,
+        "retry_count": canonical.retry_count,
+        "raw_quality_evidence": canonical.raw_quality_evidence,
+    }
 
 
 class APMasterTriggerService:
@@ -234,15 +235,18 @@ class APMasterTriggerService:
         db: Session,
         master_engine: Engine | None = None,
         orchestrator_factory: Callable[[Session], Any] | None = None,
+        master_repository: WorkflowMasterRepository | None = None,
     ):
         self.db = db
-        self.master_engine = master_engine
+        self.master_repository = (
+            master_repository
+            or WorkflowMasterRepository(master_engine or get_master_engine())
+        )
+        self.master_engine = self.master_repository.engine
         self.orchestrator_factory = orchestrator_factory
 
     def _connect_master(self) -> Connection:
-        if self.master_engine is None:
-            init_master_schema_if_needed()
-        return (self.master_engine or get_master_engine()).connect()
+        return self.master_repository.connect()
 
     def _orchestrator(self):
         if self.orchestrator_factory is not None:
@@ -250,7 +254,10 @@ class APMasterTriggerService:
 
         from app.services.orchestrator import APOrchestrator
 
-        return APOrchestrator(self.db)
+        return APOrchestrator(
+            self.db,
+            master_repository=self.master_repository,
+        )
 
     def process_new_invoices(self, limit: int = 50) -> dict:
         rows = self._fetch_master_invoices(limit=limit)
@@ -377,11 +384,16 @@ class APMasterTriggerService:
 
         self._ensure_not_posted(invoice)
         audit_summary = self._workflow_audit_summary(invoice)
-        reset_counts = self._reset_workflow_data(invoice)
-        released_rows = POGRNConsumptionLedgerService(self.db).release(
+        ledger_reset = POGRNConsumptionLedgerService(
+            self.db
+        ).prepare_for_reprocess(
             invoice,
             "Invoice reset for controlled reprocessing.",
         )
+        reset_counts = self._reset_workflow_data(invoice)
+        reset_counts[POGRNConsumptionLedger.__tablename__] += ledger_reset[
+            "removed_stale_rows"
+        ]
         self._refresh_agent_invoice(invoice, row)
         self.db.add(
             WorkflowEvent(
@@ -408,7 +420,12 @@ class APMasterTriggerService:
                         "previous_latest_message"
                     ],
                     "reset_counts": reset_counts,
-                    "released_ledger_row_count": len(released_rows),
+                    "released_ledger_row_count": ledger_reset[
+                        "released_reservations"
+                    ],
+                    "removed_stale_ledger_row_count": ledger_reset[
+                        "removed_stale_rows"
+                    ],
                     "master_tables_modified": False,
                 },
             )
@@ -574,7 +591,14 @@ class APMasterTriggerService:
         vendor_name = row.get("vendor_name") or "Unknown Vendor"
         raw_json = _load_json(row.get("raw_json"), {})
         payment_terms = _payment_terms_from_row(row, raw_json)
-        vendor_number = _vendor_number_from_row(row, raw_json, vendor_name)
+        vendor_number, vendor_audit = _vendor_number_from_row(
+            row, raw_json, vendor_name
+        )
+        invoice_date = normalize_date(row.get("invoice_date"))
+        due_date = normalize_date(row.get("due_date"))
+        extracted_currency, _ = normalize_currency_value(row.get("currency"))
+        confidence = _confidence_metadata(raw_json)
+        confidence_decision = evaluate_confidence(confidence["confidence"])
 
         invoice = Invoice(
             source="AP_MASTER_IMPORT",
@@ -582,10 +606,30 @@ class APMasterTriggerService:
             file_path="master_database",
             vendor_name=vendor_name,
             vendor_number=vendor_number,
+            extracted_vendor_number=vendor_number,
+            vendor_match_status="UNRESOLVED",
+            vendor_match_evidence=vendor_audit,
             invoice_number=row.get("invoice_number"),
-            invoice_date=_parse_date(row.get("invoice_date")),
+            normalized_invoice_number=str(
+                row.get("invoice_number") or ""
+            ).strip().upper(),
+            raw_invoice_date=_json_compatible(row.get("invoice_date")),
+            invoice_date=invoice_date.normalized_date,
+            raw_due_date=_json_compatible(row.get("due_date")),
+            due_date=due_date.normalized_date,
+            date_parse_status=invoice_date.status,
+            date_parse_warning=invoice_date.warning or invoice_date.error,
+            date_parse_evidence={
+                "invoice_date": invoice_date.to_dict(),
+                "due_date": due_date.to_dict(),
+            },
             po_number=row.get("po_number"),
-            currency=row.get("currency") or "INR",
+            currency=extracted_currency,
+            extracted_currency=extracted_currency,
+            currency_resolution_method="UNRESOLVED",
+            currency_resolution_evidence={
+                "raw_extracted_currency": row.get("currency"),
+            },
             subtotal=float(row.get("document_subtotal") or 0),
             tax_amount=float(row.get("tax_amount") or 0),
             total_amount=float(row.get("document_total") or 0),
@@ -595,7 +639,16 @@ class APMasterTriggerService:
                 row.get("payment_status")
             ),
             raw_payment_status=row.get("payment_status"),
-            extraction_confidence=1.0,
+            extraction_confidence=confidence["confidence"],
+            extraction_confidence_source=confidence["source"],
+            extraction_field_confidence=confidence["field_confidence"],
+            extraction_warnings=confidence["warnings"],
+            extraction_provider=confidence["provider"],
+            extraction_model=confidence["model"],
+            extraction_version=confidence["version"],
+            extraction_attempt_number=confidence["attempt_number"],
+            extraction_retry_count=confidence["retry_count"],
+            extraction_review_status=confidence_decision.status,
             extraction_raw={
                 "source": "invoice_master",
                 "source_last_modified": _json_compatible(
@@ -608,11 +661,29 @@ class APMasterTriggerService:
                     row.get("vat_percent")
                 ),
                 "raw_json": raw_json or _json_compatible(row),
+                "vendor_identity_audit": vendor_audit,
+                "extraction_metadata": confidence,
             },
         )
 
         self.db.add(invoice)
         self.db.flush()
+        self.db.add(
+            ExtractionAttempt(
+                invoice_id=invoice.id,
+                attempt_number=confidence["attempt_number"],
+                status=confidence_decision.status,
+                overall_confidence=confidence["confidence"],
+                field_confidence=confidence["field_confidence"],
+                warnings=confidence["warnings"],
+                ocr_provider=confidence["ocr_provider"],
+                ocr_version=confidence["ocr_version"],
+                extraction_provider=confidence["provider"],
+                extraction_model=confidence["model"],
+                schema_version=confidence["version"],
+                raw_evidence=raw_json,
+            )
+        )
         self._add_invoice_lines(invoice, row)
         self.db.flush()
         self.db.expire(invoice, ["lines"])
@@ -646,6 +717,29 @@ class APMasterTriggerService:
         return invoice
 
     def _reset_workflow_data(self, invoice: Invoice) -> dict[str, int]:
+        ledger_count = self.db.scalar(
+            select(func.count())
+            .select_from(POGRNConsumptionLedger)
+            .where(POGRNConsumptionLedger.invoice_id == invoice.id)
+        ) or 0
+        consumed_count = self.db.scalar(
+            select(func.count())
+            .select_from(POGRNConsumptionLedger)
+            .where(
+                POGRNConsumptionLedger.invoice_id == invoice.id,
+                POGRNConsumptionLedger.ledger_status == "CONSUMED",
+            )
+        ) or 0
+        if consumed_count:
+            raise UnsafeReprocessStatusError(
+                f"Invoice '{invoice.invoice_number}' cannot be reset because "
+                "consumed PO/GRN ledger history exists."
+            )
+        self.db.execute(
+            delete(POGRNConsumptionLedger).where(
+                POGRNConsumptionLedger.invoice_id == invoice.id
+            )
+        )
         child_models = (
             Communication,
             PostingAttempt,
@@ -654,7 +748,9 @@ class APMasterTriggerService:
             ExceptionCase,
             InvoiceLine,
         )
-        counts = {}
+        counts = {
+            POGRNConsumptionLedger.__tablename__: ledger_count,
+        }
 
         for model in child_models:
             counts[model.__tablename__] = self.db.scalar(
@@ -710,13 +806,23 @@ class APMasterTriggerService:
         master_posted = self._master_has_posted_invoice(
             invoice.invoice_number
         )
+        consumed_ledger = self.db.scalar(
+            select(POGRNConsumptionLedger.id)
+            .where(
+                POGRNConsumptionLedger.invoice_id == invoice.id,
+                POGRNConsumptionLedger.ledger_status == "CONSUMED",
+            )
+            .limit(1)
+        )
 
-        if successful_attempt or master_posted:
+        if successful_attempt or master_posted or consumed_ledger:
             evidence = []
             if successful_attempt:
                 evidence.append("a successful AP Agent posting attempt")
             if master_posted:
                 evidence.append("sap_posted_invoice_master")
+            if consumed_ledger:
+                evidence.append("consumed PO/GRN ledger history")
             raise UnsafeReprocessStatusError(
                 f"Invoice '{invoice.invoice_number}' cannot be reprocessed "
                 f"because posting evidence exists in {' and '.join(evidence)}."
@@ -726,16 +832,46 @@ class APMasterTriggerService:
         vendor_name = row.get("vendor_name") or "Unknown Vendor"
         raw_json = _load_json(row.get("raw_json"), {})
         payment_terms = _payment_terms_from_row(row, raw_json)
-        vendor_number = _vendor_number_from_row(row, raw_json, vendor_name)
+        vendor_number, vendor_audit = _vendor_number_from_row(
+            row, raw_json, vendor_name
+        )
+        invoice_date = normalize_date(row.get("invoice_date"))
+        due_date = normalize_date(row.get("due_date"))
+        extracted_currency, _ = normalize_currency_value(row.get("currency"))
+        confidence = _confidence_metadata(raw_json)
+        confidence_decision = evaluate_confidence(confidence["confidence"])
         invoice.source = "AP_MASTER_IMPORT"
         invoice.original_filename = f"{row.get('invoice_number')}.json"
         invoice.file_path = "master_database"
         invoice.vendor_name = vendor_name
         invoice.vendor_number = vendor_number
+        invoice.extracted_vendor_number = vendor_number
+        invoice.resolved_vendor_number = None
+        invoice.vendor_match_method = None
+        invoice.vendor_match_status = "UNRESOLVED"
+        invoice.vendor_match_evidence = vendor_audit
         invoice.invoice_number = row.get("invoice_number")
-        invoice.invoice_date = _parse_date(row.get("invoice_date"))
+        invoice.normalized_invoice_number = str(
+            row.get("invoice_number") or ""
+        ).strip().upper()
+        invoice.raw_invoice_date = _json_compatible(row.get("invoice_date"))
+        invoice.invoice_date = invoice_date.normalized_date
+        invoice.raw_due_date = _json_compatible(row.get("due_date"))
+        invoice.due_date = due_date.normalized_date
+        invoice.date_parse_status = invoice_date.status
+        invoice.date_parse_warning = invoice_date.warning or invoice_date.error
+        invoice.date_parse_evidence = {
+            "invoice_date": invoice_date.to_dict(),
+            "due_date": due_date.to_dict(),
+        }
         invoice.po_number = row.get("po_number")
-        invoice.currency = row.get("currency") or "INR"
+        invoice.currency = extracted_currency
+        invoice.extracted_currency = extracted_currency
+        invoice.resolved_currency = None
+        invoice.currency_resolution_method = "UNRESOLVED"
+        invoice.currency_resolution_evidence = {
+            "raw_extracted_currency": row.get("currency"),
+        }
         invoice.subtotal = float(row.get("document_subtotal") or 0)
         invoice.tax_amount = float(row.get("tax_amount") or 0)
         invoice.total_amount = float(row.get("document_total") or 0)
@@ -752,7 +888,18 @@ class APMasterTriggerService:
             actor="APMasterTriggerService",
             metadata={"controlled_reprocess": True},
         )
-        invoice.extraction_confidence = 1.0
+        invoice.extraction_confidence = confidence["confidence"]
+        invoice.extraction_confidence_source = confidence["source"]
+        invoice.extraction_field_confidence = confidence["field_confidence"]
+        invoice.extraction_warnings = confidence["warnings"]
+        invoice.extraction_provider = confidence["provider"]
+        invoice.extraction_model = confidence["model"]
+        invoice.extraction_version = confidence["version"]
+        invoice.extraction_attempt_number = (
+            int(invoice.extraction_attempt_number or 0) + 1
+        )
+        invoice.extraction_retry_count = confidence["retry_count"]
+        invoice.extraction_review_status = confidence_decision.status
         invoice.extraction_raw = {
             "source": "invoice_master",
             "source_last_modified": _json_compatible(
@@ -765,7 +912,25 @@ class APMasterTriggerService:
                 row.get("vat_percent")
             ),
             "raw_json": raw_json or _json_compatible(row),
+            "vendor_identity_audit": vendor_audit,
+            "extraction_metadata": confidence,
         }
+        self.db.add(
+            ExtractionAttempt(
+                invoice_id=invoice.id,
+                attempt_number=invoice.extraction_attempt_number,
+                status=confidence_decision.status,
+                overall_confidence=confidence["confidence"],
+                field_confidence=confidence["field_confidence"],
+                warnings=confidence["warnings"],
+                ocr_provider=confidence["ocr_provider"],
+                ocr_version=confidence["ocr_version"],
+                extraction_provider=confidence["provider"],
+                extraction_model=confidence["model"],
+                schema_version=confidence["version"],
+                raw_evidence=raw_json,
+            )
+        )
         self._add_invoice_lines(invoice, row)
         self.db.flush()
         self.db.expire(invoice, ["lines"])

@@ -34,10 +34,41 @@ def invoice_summary(invoice: Invoice) -> dict:
         "id": invoice.id,
         "invoice_number": invoice.invoice_number,
         "vendor_name": invoice.vendor_name,
+        "invoice_supplier_name": invoice.vendor_name,
         "vendor_number": invoice.vendor_number,
+        "extracted_vendor_number": invoice.extracted_vendor_number,
+        "resolved_vendor_number": invoice.resolved_vendor_number,
+        "vendor_match_method": invoice.vendor_match_method,
+        "vendor_match_status": invoice.vendor_match_status,
         "po_number": invoice.po_number,
-        "invoice_date": invoice.invoice_date.isoformat(),
+        "raw_invoice_date": invoice.raw_invoice_date,
+        "invoice_date": (
+            invoice.invoice_date.isoformat()
+            if invoice.invoice_date is not None
+            else None
+        ),
+        "normalized_invoice_date": (
+            invoice.invoice_date.isoformat()
+            if invoice.invoice_date is not None
+            else None
+        ),
+        "raw_due_date": invoice.raw_due_date,
+        "due_date": (
+            invoice.due_date.isoformat()
+            if invoice.due_date is not None
+            else None
+        ),
+        "normalized_due_date": (
+            invoice.due_date.isoformat()
+            if invoice.due_date is not None
+            else None
+        ),
+        "date_parse_status": invoice.date_parse_status,
+        "date_parse_warning": invoice.date_parse_warning,
         "currency": invoice.currency,
+        "extracted_currency": invoice.extracted_currency,
+        "resolved_currency": invoice.resolved_currency,
+        "currency_resolution_method": invoice.currency_resolution_method,
         "total_amount": invoice.total_amount,
         "status": invoice.status,
         "workflow_status": invoice.status,
@@ -60,6 +91,24 @@ def invoice_payload(invoice: Invoice) -> dict:
             "tax_amount": invoice.tax_amount,
             "payment_terms": invoice.payment_terms,
             "extraction_confidence": invoice.extraction_confidence,
+            "extraction_confidence_source": (
+                invoice.extraction_confidence_source
+            ),
+            "extraction_field_confidence": (
+                invoice.extraction_field_confidence or {}
+            ),
+            "extraction_warnings": invoice.extraction_warnings or [],
+            "extraction_provider": invoice.extraction_provider,
+            "extraction_model": invoice.extraction_model,
+            "extraction_version": invoice.extraction_version,
+            "extraction_attempt_number": invoice.extraction_attempt_number,
+            "extraction_retry_count": invoice.extraction_retry_count,
+            "extraction_review_status": invoice.extraction_review_status,
+            "vendor_match_evidence": invoice.vendor_match_evidence or {},
+            "date_parse_evidence": invoice.date_parse_evidence or {},
+            "currency_resolution_evidence": (
+                invoice.currency_resolution_evidence or {}
+            ),
             "extraction_quality_status": quality.get(
                 "extraction_quality_status",
                 quality.get("status"),
@@ -83,6 +132,25 @@ def invoice_payload(invoice: Invoice) -> dict:
                     "po_item": line.po_item,
                 }
                 for line in invoice.lines
+            ],
+            "extraction_attempts": [
+                {
+                    "attempt_number": item.attempt_number,
+                    "status": item.status,
+                    "overall_confidence": item.overall_confidence,
+                    "field_confidence": item.field_confidence,
+                    "warnings": item.warnings,
+                    "ocr_provider": item.ocr_provider,
+                    "ocr_version": item.ocr_version,
+                    "extraction_provider": item.extraction_provider,
+                    "extraction_model": item.extraction_model,
+                    "schema_version": item.schema_version,
+                    "created_at": item.created_at.isoformat(),
+                }
+                for item in sorted(
+                    invoice.extraction_attempts,
+                    key=lambda item: item.attempt_number,
+                )
             ],
         }
     )

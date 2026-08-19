@@ -23,6 +23,7 @@ from app.config import settings
 from app.db import Base, engine, get_db
 from app.artifact_models import ArtifactBase
 from app.integrations.sap.mock import MockSAPGateway
+from app.integrations.llm.factory import get_llm_client
 from app.models import ExceptionCase, Invoice
 from app.schemas import (
     CommunicationRequest,
@@ -35,6 +36,10 @@ from app.services.exception_response_intake_service import (
     ExceptionResponseIntakeService,
 )
 from app.services.intake_service import IntakeService
+from app.services.extraction_quality_service import (
+    ExtractionQualityService,
+    is_extraction_clean,
+)
 from app.services.orchestrator import APOrchestrator
 from app.services.status_catalog_service import InvoiceWorkflowStatus
 from app.services.serializers import (
@@ -59,6 +64,7 @@ def _load_invoice(
             selectinload(Invoice.communications),
             selectinload(Invoice.events),
             selectinload(Invoice.postings),
+            selectinload(Invoice.extraction_attempts),
         )
     )
     if not invoice:
@@ -173,6 +179,37 @@ def process_invoice(
     return invoice_detail(
         _load_invoice(db, invoice_id)
     )
+
+
+@router.post("/invoices/{invoice_id}/extraction-retry")
+def retry_invoice_extraction(
+    invoice_id: str,
+    db: Session = Depends(get_db),
+):
+    invoice = _load_invoice(db, invoice_id)
+    if invoice.status not in {
+        InvoiceWorkflowStatus.EXTRACTION_REVIEW_REQUIRED,
+        InvoiceWorkflowStatus.EXTRACTION_RETRY_REQUIRED,
+        InvoiceWorkflowStatus.EXTRACTION_FAILED,
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Enhanced extraction retry is available only for an "
+                "invoice in extraction review, retry, or failed state."
+            ),
+        )
+    results = ExtractionQualityService(
+        db, get_llm_client()
+    ).process(
+        invoice,
+        allow_retry=True,
+        raw_evidence=invoice.extraction_raw,
+    )
+    db.commit()
+    if is_extraction_clean(results):
+        APOrchestrator(db).process(invoice)
+    return invoice_detail(_load_invoice(db, invoice_id))
 
 
 @router.post("/invoices/{invoice_id}/recheck")

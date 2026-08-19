@@ -161,7 +161,7 @@ def main() -> int:
                     "LEDGER-PRIOR-004",
                     "PO-LEDGER-004",
                     quantity=6,
-                    status="FAILED",
+                    status="READY_FOR_POSTING",
                 )
                 ledger_current = _invoice(
                     Invoice,
@@ -239,6 +239,40 @@ def main() -> int:
                     )
                 )
                 assert reversed_results["CONS-001"].passed is True
+
+                stale_import = _invoice(
+                    Invoice,
+                    "LEDGER-SAME-BUSINESS-006",
+                    "PO-LEDGER-006",
+                    quantity=10,
+                    status="READY_FOR_POSTING",
+                )
+                current_import = _invoice(
+                    Invoice,
+                    "ledger same business 006",
+                    "PO-LEDGER-006",
+                    quantity=10,
+                )
+                db.add_all([stale_import, current_import])
+                db.commit()
+                service.reserve(
+                    stale_import,
+                    _context("PO-LEDGER-006", grn_quantity=10),
+                )
+                db.commit()
+                same_business_results = _by_code(
+                    control.evaluate(
+                        current_import,
+                        _context("PO-LEDGER-006", grn_quantity=10),
+                    )
+                )
+                same_business_detail = same_business_results[
+                    "CONS-001"
+                ].details["lines"][0]
+                assert same_business_detail[
+                    "prior_consumed_quantity"
+                ] == 0
+                assert same_business_results["CONS-001"].passed is True
         finally:
             agent_engine.dispose()
             master_engine.dispose()

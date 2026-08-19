@@ -198,6 +198,7 @@ def _check_posted_invoice_payment_terms_payload() -> None:
         {"po": {"payment_terms": "NET 30"}},
     )
     assert invoice_terms_payload["payment_terms"] == "NET 60"
+    assert invoice_terms_payload["due_date"] == "2026-08-14"
 
     po_terms_payload = APOrchestrator._posted_invoice_payload(
         orchestrator,
@@ -213,6 +214,7 @@ def _check_posted_invoice_payment_terms_payload() -> None:
         {"po": {"payment_terms": "NET 30"}},
     )
     assert po_terms_payload["payment_terms"] == "NET 30"
+    assert po_terms_payload["due_date"] == "2026-07-15"
 
 
 def _invoice(

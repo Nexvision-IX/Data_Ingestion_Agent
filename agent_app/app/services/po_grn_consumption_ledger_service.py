@@ -3,7 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -15,6 +15,7 @@ from app.services.grn_status_control import (
     VALID_GRN_STATUSES,
     normalize_grn,
 )
+from app.services.business_invoice_identity import business_invoice_key
 from app.services.status_catalog_service import (
     ACTIVE_LEDGER_STATUSES,
     LedgerStatus,
@@ -56,9 +57,10 @@ class POGRNConsumptionLedgerService:
         context: dict[str, Any],
         reason: str = "Invoice passed blocking validation.",
     ) -> list[POGRNConsumptionLedger]:
+        identity_key = business_invoice_key(invoice, context)
         existing = self.db.scalars(
             select(POGRNConsumptionLedger).where(
-                POGRNConsumptionLedger.invoice_id == invoice.id,
+                POGRNConsumptionLedger.business_invoice_key == identity_key,
                 POGRNConsumptionLedger.ledger_status.in_(
                     ACTIVE_LEDGER_STATUSES
                 ),
@@ -94,9 +96,14 @@ class POGRNConsumptionLedgerService:
             row = POGRNConsumptionLedger(
                 invoice_id=invoice.id,
                 invoice_number=invoice.invoice_number,
+                business_invoice_key=identity_key,
+                company_code=identity_key.split("|", 1)[0],
+                fiscal_year=invoice.invoice_date.year,
                 po_number=invoice.po_number or "",
                 po_item=item_key,
-                active_key=f"{invoice.id}:{item_key}",
+                active_key=(
+                    f"{identity_key}:{invoice.po_number or ''}:{item_key}"
+                ),
                 grn_number=(
                     matching_grns[0].get("grn_number")
                     if len(matching_grns) == 1
@@ -126,6 +133,50 @@ class POGRNConsumptionLedgerService:
                 },
             )
         return rows
+
+    def prepare_for_reprocess(
+        self,
+        invoice: Invoice,
+        reason: str = "Invoice reset for controlled reprocessing.",
+    ) -> dict[str, int]:
+        """Release reservations and remove only non-consumed stale rows."""
+        consumed = self.db.scalar(
+            select(func.count())
+            .select_from(POGRNConsumptionLedger)
+            .where(
+                POGRNConsumptionLedger.invoice_id == invoice.id,
+                POGRNConsumptionLedger.ledger_status
+                == LedgerStatus.CONSUMED,
+            )
+        ) or 0
+        if consumed:
+            raise RuntimeError(
+                "Controlled reprocessing is blocked because consumed "
+                "PO/GRN ledger history exists."
+            )
+
+        released = self.release(invoice, reason)
+        stale_count = self.db.scalar(
+            select(func.count())
+            .select_from(POGRNConsumptionLedger)
+            .where(
+                POGRNConsumptionLedger.invoice_id == invoice.id,
+                POGRNConsumptionLedger.ledger_status
+                != LedgerStatus.CONSUMED,
+            )
+        ) or 0
+        self.db.execute(
+            delete(POGRNConsumptionLedger).where(
+                POGRNConsumptionLedger.invoice_id == invoice.id,
+                POGRNConsumptionLedger.ledger_status
+                != LedgerStatus.CONSUMED,
+            )
+        )
+        self.db.flush()
+        return {
+            "released_reservations": len(released),
+            "removed_stale_rows": stale_count,
+        }
 
     def consume(
         self,

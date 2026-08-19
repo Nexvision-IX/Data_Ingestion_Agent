@@ -479,3 +479,7 @@ def reset_demo_environment():
         )
 
     return master_repository.reset_demo_environment()
+
+
+def reset_invoice_flow_data():
+    return master_repository.reset_invoice_flow_data()

@@ -34,6 +34,7 @@ OWNER_BY_CATEGORY = {
     "FINANCIAL_MISMATCH": "AP / Finance",
     "TAX_MISMATCH": "AP / Tax",
     "DATE_POLICY_EXCEPTION": "AP / Finance",
+    "DATE_SEQUENCE_ERROR": "AP / Finance",
     "DUPLICATE_INVOICE": "AP",
     "OTHER_EXCEPTION": "AP Reviewer",
 }
@@ -83,6 +84,10 @@ NON_RECHECK_REASONS = {
     "DATE_POLICY_EXCEPTION": (
         "Date-policy failures require corrected invoice data or accounting-"
         "period review before reprocessing."
+    ),
+    "DATE_SEQUENCE_ERROR": (
+        "Correct the authoritative date sequence and rerun deterministic "
+        "validation."
     ),
 }
 

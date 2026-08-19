@@ -10,6 +10,9 @@ from app.config import settings
 from app.db import Base, engine
 from app.artifact_models import ArtifactBase
 from app.services.status_catalog_service import ensure_invoice_status_columns
+from app.services.po_grn_ledger_schema_service import (
+    ensure_po_grn_ledger_schema,
+)
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -27,6 +30,7 @@ async def lifespan(app: FastAPI):
         Base.metadata.create_all(bind=engine)
         ArtifactBase.metadata.create_all(bind=engine)
         ensure_invoice_status_columns(engine)
+        ensure_po_grn_ledger_schema(engine)
         logger.info("Agent table auto-create completed.")
     else:
         logger.info(

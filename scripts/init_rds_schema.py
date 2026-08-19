@@ -30,6 +30,9 @@ from ap_database.settings import (
 from app.db import Base
 import app.models  # noqa: F401 - registers Agent API tables with Base metadata
 from app.services.status_catalog_service import ensure_invoice_status_columns
+from app.services.po_grn_ledger_schema_service import (
+    ensure_po_grn_ledger_schema,
+)
 
 
 def _database_mode(url: str) -> str:
@@ -72,6 +75,7 @@ def main() -> int:
         Base.metadata.create_all(bind=agent_engine)
         ArtifactBase.metadata.create_all(bind=agent_engine)
         ensure_invoice_status_columns(agent_engine)
+        ensure_po_grn_ledger_schema(agent_engine)
         print("[SUCCESS] Agent tables are initialized.")
     except Exception as exc:
         success = False

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 from typing import Any
 
 from app.config import settings
@@ -10,19 +10,11 @@ from app.services.grn_status_control import (
     VALID_GRN_STATUSES,
     normalize_grn,
 )
+from app.services.date_normalization_service import normalize_date
 
 
 def _date(value: Any) -> date | None:
-    if value is None or value == "":
-        return None
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    try:
-        return date.fromisoformat(str(value).strip()[:10])
-    except (TypeError, ValueError):
-        return None
+    return normalize_date(value).normalized_date
 
 
 class DateSequenceControl:
@@ -47,7 +39,12 @@ class DateSequenceControl:
         invoice: Invoice,
         context: dict[str, Any],
     ) -> list[RuleResult]:
-        invoice_date = _date(invoice.invoice_date)
+        invoice_parse = normalize_date(
+            invoice.raw_invoice_date
+            if invoice.raw_invoice_date not in (None, "")
+            else invoice.invoice_date
+        )
+        invoice_date = invoice_parse.normalized_date
         po = context.get("po") or {}
         po_date = _date(po.get("po_date"))
         valid_grns = [
@@ -115,8 +112,14 @@ class DateSequenceControl:
                     else "Invoice date is missing or invalid."
                 ),
                 details={
-                    "raw_invoice_date": invoice.invoice_date,
+                    "raw_invoice_date": invoice_parse.raw_value,
                     "invoice_date": self._format(invoice_date),
+                    "parse_status": invoice_parse.status,
+                    "detected_format": invoice_parse.detected_format,
+                    "parse_warning": (
+                        invoice_parse.warning or invoice_parse.error
+                    ),
+                    "ambiguous": invoice_parse.ambiguous,
                 },
             ),
             RuleResult(
@@ -207,6 +210,18 @@ class DateSequenceControl:
                     "invoice_age_days": age_days,
                     "max_invoice_age_days": self.max_invoice_age_days,
                 },
+            ),
+            RuleResult(
+                rule_code="DATE-006",
+                rule_name="Invoice date ambiguity is recorded",
+                passed=not invoice_parse.ambiguous,
+                severity="WARNING",
+                message=(
+                    "Invoice date is unambiguous."
+                    if not invoice_parse.ambiguous
+                    else invoice_parse.warning
+                ),
+                details=invoice_parse.to_dict(),
             ),
         ]
 

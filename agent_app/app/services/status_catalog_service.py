@@ -235,6 +235,7 @@ ALLOWED_INVOICE_STATUS_TRANSITIONS = {
     },
     InvoiceWorkflowStatus.EXTRACTION_REVIEW_REQUIRED: {
         InvoiceWorkflowStatus.EXTRACTED,
+        InvoiceWorkflowStatus.EXTRACTION_RETRY_REQUIRED,
         InvoiceWorkflowStatus.CANCELLED,
     },
     InvoiceWorkflowStatus.EXTRACTED: {

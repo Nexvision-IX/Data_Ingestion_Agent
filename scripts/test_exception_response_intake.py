@@ -256,6 +256,9 @@ def main() -> None:
             assert general_invoice.po_number == "PO-EXISTING"
             assert general_invoice.payment_terms == "NET30"
 
+            RecordingOrchestrator.calls = 0
+            RecordingOrchestrator.observed_po_numbers.clear()
+
             resume_invoice, resume_exception, _ = make_case(
                 db, suffix="RESUME"
             )
@@ -348,3 +351,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

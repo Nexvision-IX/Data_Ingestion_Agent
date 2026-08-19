@@ -27,7 +27,9 @@ def main() -> int:
     missing = _validate(None, include_vendor=False)
     assert missing["VND-001"].passed is False
     assert missing["VND-002"].passed is False
-    assert missing["VND-003"].passed is False
+    # There is no separate vendor-master dependency. Supplier identity can
+    # still match deterministically against the authoritative PO.
+    assert missing["VND-003"].passed is True
 
     for status in (
         "Blocked",

@@ -97,11 +97,11 @@ def main() -> int:
 
     with get_conn() as connection:
         for po in pos:
-            upsert_po(connection, po)
+            upsert_po(po, connection=connection)
         for grn in grns:
-            upsert_grn(connection, grn)
+            upsert_grn(grn, connection=connection)
         for posted in POSTED_DUPLICATE_SEEDS:
-            upsert_posted_invoice(connection, posted)
+            upsert_posted_invoice(posted, connection=connection)
         connection.commit()
 
     print("[SUCCESS] v3 test master data loaded.")
@@ -116,3 +116,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+

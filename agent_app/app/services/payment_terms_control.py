@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Any
 
 from app.models import Invoice
 from app.rules.validation import RuleResult
+from app.services.date_normalization_service import normalize_date
 
 
 _SEPARATORS = re.compile(r"[^A-Z0-9]+")
@@ -32,16 +33,16 @@ def normalize_payment_terms(value: Any) -> str:
 
 
 def _date(value: Any) -> date | None:
-    if value is None or value == "":
+    return normalize_date(value).normalized_date
+
+
+def calculate_due_date(invoice_date: Any, payment_terms: Any) -> date | None:
+    """Return the canonical due date for recognized payment terms."""
+    normalized_invoice_date = _date(invoice_date)
+    normalized_terms = normalize_payment_terms(payment_terms)
+    if normalized_invoice_date is None or normalized_terms not in _TERM_DAYS:
         return None
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    try:
-        return date.fromisoformat(str(value).strip()[:10])
-    except (TypeError, ValueError):
-        return None
+    return normalized_invoice_date + timedelta(days=_TERM_DAYS[normalized_terms])
 
 
 class PaymentTermsControl:
@@ -71,12 +72,7 @@ class PaymentTermsControl:
             reference_terms = vendor_terms
 
         invoice_date = _date(invoice.invoice_date)
-        calculated_due_date = (
-            invoice_date + timedelta(days=_TERM_DAYS[invoice_terms])
-            if invoice_date is not None
-            and invoice_terms in _TERM_DAYS
-            else None
-        )
+        calculated_due_date = calculate_due_date(invoice_date, invoice_terms)
         actual_due_date_raw = self._actual_due_date(invoice)
         actual_due_date = _date(actual_due_date_raw)
 
@@ -99,6 +95,8 @@ class PaymentTermsControl:
             )
         )
         effective_due_date = actual_due_date or calculated_due_date
+        if actual_due_date is None and calculated_due_date is not None:
+            invoice.due_date = calculated_due_date
         due_not_before_invoice = (
             invoice_date is not None
             and effective_due_date is not None
@@ -134,7 +132,7 @@ class PaymentTermsControl:
             RuleResult(
                 rule_code="PAY-002",
                 rule_name="Invoice payment terms match approved terms",
-                passed=terms_present and terms_match,
+                passed=terms_present and (terms_match or not reference_available),
                 severity="ERROR",
                 message=(
                     "Invoice payment terms match the approved reference."
@@ -278,3 +276,4 @@ class PaymentTermsControl:
     @staticmethod
     def _format(value: date | None) -> str | None:
         return value.isoformat() if value is not None else None
+

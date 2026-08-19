@@ -40,6 +40,7 @@ def main() -> int:
         from app.models import (
             Invoice,
             InvoiceLine,
+            POGRNConsumptionLedger,
             PostingAttempt,
             ValidationResult,
             WorkflowEvent,
@@ -48,6 +49,9 @@ def main() -> int:
             APMasterTriggerService,
             ReprocessExecutionError,
             UnsafeReprocessStatusError,
+        )
+        from app.services.po_grn_consumption_ledger_service import (
+            POGRNConsumptionLedgerService,
         )
 
         agent_engine = create_engine(
@@ -273,6 +277,11 @@ def main() -> int:
                     metadata_json={},
                 )
             )
+            POGRNConsumptionLedgerService(agent_db).reserve(
+                stuck,
+                _ledger_context(stuck.po_number),
+                reason="Stale pre-reprocess reservation.",
+            )
             agent_db.commit()
 
             result = APMasterTriggerService(
@@ -291,6 +300,14 @@ def main() -> int:
             assert invoices[0].id == original_agent_id
             assert invoices[0].po_number == "PO-TEST-001"
             assert result["reprocessed"] is True
+            assert result["reset_counts"][
+                "po_grn_consumption_ledger"
+            ] == 1
+            assert agent_db.scalars(
+                select(POGRNConsumptionLedger).where(
+                    POGRNConsumptionLedger.invoice_id == original_agent_id
+                )
+            ).all() == []
 
             lines = agent_db.scalars(
                 select(InvoiceLine).where(
@@ -334,23 +351,23 @@ def main() -> int:
                 reset_event.metadata_json[
                     "previous_workflow_event_count"
                 ]
-                == 1
+                == 2
             )
             assert (
                 reset_event.metadata_json["previous_latest_event_type"]
-                == "STALE_EVENT"
+                == "PO_GRN_CONSUMPTION_RESERVED"
             )
             assert (
                 reset_event.metadata_json["previous_latest_agent_name"]
-                == "Test"
+                == "POGRNConsumptionLedgerService"
             )
             assert (
                 reset_event.metadata_json["previous_latest_message"]
-                == "Stale"
+                == "Reserved PO/GRN consumption for 1 invoice line(s)."
             )
             assert reset_event.metadata_json["reset_counts"][
                 "workflow_events"
-            ] == 1
+            ] == 3
             assert reset_event.metadata_json["reset_counts"][
                 "validation_results"
             ] == 1
@@ -398,6 +415,16 @@ def main() -> int:
                 posted_invoice_number,
                 status="READY_FOR_POSTING",
             )
+            posted_invoice.lines.append(
+                InvoiceLine(
+                    line_number=1,
+                    description="Posted consumption",
+                    quantity=1,
+                    unit_price=1,
+                    tax_rate=0,
+                    po_item="00001",
+                )
+            )
             agent_db.flush()
             agent_db.add(
                 PostingAttempt(
@@ -407,6 +434,12 @@ def main() -> int:
                     message="Already posted",
                 )
             )
+            ledger_service = POGRNConsumptionLedgerService(agent_db)
+            ledger_service.reserve(
+                posted_invoice,
+                _ledger_context(posted_invoice.po_number),
+            )
+            ledger_service.consume(posted_invoice)
             agent_db.commit()
 
             try:
@@ -418,6 +451,13 @@ def main() -> int:
                 raise AssertionError("Posted invoice was reprocessed")
             except UnsafeReprocessStatusError as exc:
                 assert "successful AP Agent posting attempt" in str(exc)
+            consumed_rows = agent_db.scalars(
+                select(POGRNConsumptionLedger).where(
+                    POGRNConsumptionLedger.invoice_id == posted_invoice.id,
+                    POGRNConsumptionLedger.ledger_status == "CONSUMED",
+                )
+            ).all()
+            assert len(consumed_rows) == 1
 
             master_posted_invoice = _add_stuck_invoice(
                 agent_db,
@@ -489,6 +529,20 @@ def _add_stuck_invoice(
         )
     )
     return invoice
+
+
+def _ledger_context(po_number: str) -> dict:
+    return {
+        "grns": [
+            {
+                "grn_number": f"GRN-{po_number}",
+                "po_number": po_number,
+                "po_item": "00001",
+                "received_quantity": 10,
+                "status": "POSTED",
+            }
+        ]
+    }
 
 
 def _master_snapshot(engine, *models) -> dict[str, list[dict]]:

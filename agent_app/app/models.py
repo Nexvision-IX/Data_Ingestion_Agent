@@ -5,7 +5,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, JSON, Numeric, String, Text
+from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, Float, ForeignKey, Index, Integer, JSON, Numeric, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -25,6 +25,13 @@ def _now() -> datetime:
 
 class Invoice(Base):
     __tablename__ = "invoices"
+    __table_args__ = (
+        CheckConstraint(
+            "extraction_confidence IS NULL OR "
+            "(extraction_confidence >= 0 AND extraction_confidence <= 1)",
+            name="ck_invoices_extraction_confidence_bounded",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_id)
     source: Mapped[str] = mapped_column(String(40), default="UPLOAD")
@@ -32,11 +39,51 @@ class Invoice(Base):
     file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     vendor_name: Mapped[str] = mapped_column(String(255))
-    vendor_number: Mapped[str] = mapped_column(String(50))
+    vendor_number: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    extracted_vendor_number: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )
+    resolved_vendor_number: Mapped[str | None] = mapped_column(
+        String(100), nullable=True, index=True
+    )
+    vendor_match_method: Mapped[str | None] = mapped_column(
+        String(50), nullable=True
+    )
+    vendor_match_status: Mapped[str | None] = mapped_column(
+        String(50), nullable=True
+    )
+    vendor_match_evidence: Mapped[dict[str, Any]] = mapped_column(
+        JSON_DOCUMENT, default=dict
+    )
     invoice_number: Mapped[str] = mapped_column(String(100), index=True)
-    invoice_date: Mapped[date] = mapped_column(Date)
+    normalized_invoice_number: Mapped[str | None] = mapped_column(
+        String(120), nullable=True, index=True
+    )
+    raw_invoice_date: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    invoice_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    raw_due_date: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    date_parse_status: Mapped[str | None] = mapped_column(
+        String(30), nullable=True
+    )
+    date_parse_warning: Mapped[str | None] = mapped_column(Text, nullable=True)
+    date_parse_evidence: Mapped[dict[str, Any]] = mapped_column(
+        JSON_DOCUMENT, default=dict
+    )
     po_number: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
-    currency: Mapped[str] = mapped_column(String(10), default="INR")
+    currency: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    extracted_currency: Mapped[str | None] = mapped_column(
+        String(20), nullable=True
+    )
+    resolved_currency: Mapped[str | None] = mapped_column(
+        String(10), nullable=True
+    )
+    currency_resolution_method: Mapped[str | None] = mapped_column(
+        String(50), nullable=True
+    )
+    currency_resolution_evidence: Mapped[dict[str, Any]] = mapped_column(
+        JSON_DOCUMENT, default=dict
+    )
     subtotal: Mapped[float] = mapped_column(Float, default=0)
     tax_amount: Mapped[float] = mapped_column(Float, default=0)
     total_amount: Mapped[float] = mapped_column(Float, default=0)
@@ -51,7 +98,32 @@ class Invoice(Base):
     raw_payment_status: Mapped[str | None] = mapped_column(
         String(100), nullable=True
     )
-    extraction_confidence: Mapped[float] = mapped_column(Float, default=0)
+    extraction_confidence: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )
+    extraction_confidence_source: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )
+    extraction_field_confidence: Mapped[dict[str, Any]] = mapped_column(
+        JSON_DOCUMENT, default=dict
+    )
+    extraction_warnings: Mapped[list[Any]] = mapped_column(
+        JSON_DOCUMENT, default=list
+    )
+    extraction_provider: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )
+    extraction_model: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )
+    extraction_version: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )
+    extraction_attempt_number: Mapped[int] = mapped_column(Integer, default=1)
+    extraction_retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    extraction_review_status: Mapped[str | None] = mapped_column(
+        String(50), nullable=True, index=True
+    )
     extraction_raw: Mapped[dict[str, Any]] = mapped_column(JSON_DOCUMENT, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
@@ -62,7 +134,60 @@ class Invoice(Base):
     communications: Mapped[list["Communication"]] = relationship(back_populates="invoice", cascade="all, delete-orphan")
     events: Mapped[list["WorkflowEvent"]] = relationship(back_populates="invoice", cascade="all, delete-orphan")
     postings: Mapped[list["PostingAttempt"]] = relationship(back_populates="invoice", cascade="all, delete-orphan")
-    consumption_ledger: Mapped[list["POGRNConsumptionLedger"]] = relationship(back_populates="invoice")
+    consumption_ledger: Mapped[list["POGRNConsumptionLedger"]] = relationship(
+        back_populates="invoice",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    extraction_attempts: Mapped[list["ExtractionAttempt"]] = relationship(
+        back_populates="invoice",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class ExtractionAttempt(Base):
+    __tablename__ = "extraction_attempts"
+    __table_args__ = (
+        Index(
+            "uq_extraction_attempt_invoice_number",
+            "invoice_id",
+            "attempt_number",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_id)
+    invoice_id: Mapped[str] = mapped_column(
+        ForeignKey("invoices.id", ondelete="CASCADE"),
+        index=True,
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(50))
+    overall_confidence: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )
+    field_confidence: Mapped[dict[str, Any]] = mapped_column(
+        JSON_DOCUMENT, default=dict
+    )
+    warnings: Mapped[list[Any]] = mapped_column(JSON_DOCUMENT, default=list)
+    ocr_provider: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    ocr_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    extraction_provider: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )
+    extraction_model: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )
+    schema_version: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )
+    raw_evidence: Mapped[dict[str, Any]] = mapped_column(
+        JSON_DOCUMENT, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+    invoice: Mapped["Invoice"] = relationship(back_populates="extraction_attempts")
 
 
 class InvoiceLine(Base):
@@ -164,17 +289,35 @@ class PostingAttempt(Base):
 
 class POGRNConsumptionLedger(Base):
     __tablename__ = "po_grn_consumption_ledger"
+    __table_args__ = (
+        Index(
+            "uq_po_grn_active_business_reservation",
+            "business_invoice_key",
+            "po_number",
+            "po_item",
+            unique=True,
+            sqlite_where=text("ledger_status = 'RESERVED'"),
+            postgresql_where=text("ledger_status = 'RESERVED'"),
+        ),
+        Index(
+            "ix_po_grn_ledger_business_invoice_key",
+            "business_invoice_key",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_id)
     invoice_id: Mapped[str] = mapped_column(
-        ForeignKey("invoices.id"),
+        ForeignKey("invoices.id", ondelete="CASCADE"),
         index=True,
     )
     invoice_number: Mapped[str] = mapped_column(String(100), index=True)
+    business_invoice_key: Mapped[str] = mapped_column(String(255))
+    company_code: Mapped[str] = mapped_column(String(20), default="1000")
+    fiscal_year: Mapped[int] = mapped_column(Integer)
     po_number: Mapped[str] = mapped_column(String(100), index=True)
     po_item: Mapped[str] = mapped_column(String(20), index=True)
     active_key: Mapped[str | None] = mapped_column(
-        String(100),
+        String(500),
         nullable=True,
         unique=True,
     )

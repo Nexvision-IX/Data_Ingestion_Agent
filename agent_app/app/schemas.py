@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from datetime import date
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+from app.services.extraction_confidence_mapping import (
+    canonicalize_extraction_confidence,
+)
 
 
 class ExtractedLine(BaseModel):
@@ -17,19 +19,47 @@ class ExtractedLine(BaseModel):
 
 class ExtractedInvoice(BaseModel):
     vendor_name: str
-    vendor_number: str
+    vendor_number: str | None = None
     vendor_email: str | None = None
     invoice_number: str
-    invoice_date: date
+    invoice_date: Any = None
+    due_date: Any = None
     po_number: str | None = None
-    currency: str = "INR"
+    currency: str | None = None
     subtotal: float
     tax_amount: float
     total_amount: float
     payment_terms: str | None = None
-    confidence: float = Field(default=0.95, ge=0, le=1)
+    extraction_confidence: float | None = Field(default=None, ge=0, le=1)
+    extraction_quality_score: float | None = None
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    extraction_confidence_source: str | None = None
+    confidence_source: str | None = None
+    field_confidence: dict[str, Any] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    ocr_provider: str | None = None
+    ocr_version: str | None = None
+    extraction_provider: str | None = None
+    extraction_model: str | None = None
+    schema_version: str | None = None
+    extraction_attempt_number: int = Field(default=1, ge=1)
+    retry_count: int = Field(default=0, ge=0)
     lines: list[ExtractedLine]
     raw: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def map_legacy_confidence(self):
+        canonical = canonicalize_extraction_confidence(
+            self.model_dump(exclude={"raw"})
+        )
+        self.extraction_confidence = canonical.extraction_confidence
+        self.extraction_confidence_source = canonical.confidence_source
+        self.confidence_source = canonical.confidence_source
+        self.field_confidence = canonical.field_confidence
+        self.warnings = canonical.warnings
+        self.extraction_attempt_number = canonical.attempt_number
+        self.retry_count = canonical.retry_count
+        return self
 
 
 class ClassificationOutput(BaseModel):

@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.security import HTTPBasic, HTTPBasicCredentials, HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
-from ingestion.master_ingestion import (
-    reset_demo_environment
+from reset_contract import (
+    MockSAPDeletedCounts,
+    MockSAPResetRequest,
+    MockSAPResetResponse,
+    MOCK_SAP_INVOICE_FLOW_RESET_ROUTE,
+    MOCK_SAP_MASTER_RESET_ROUTE,
+    ResetMode,
 )
 basic_auth = HTTPBasic()
 bearer_auth = HTTPBearer()
@@ -61,8 +67,12 @@ def load_json_list(path: Path) -> List[Dict[str, Any]]:
 
 
 def save_json_file(path: Path, data: List[Dict[str, Any]]) -> None:
-    with open(path, "w", encoding="utf-8") as f:
+    temporary_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    with open(temporary_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
+    temporary_path.replace(path)
 
 
 def normalize_dt(value: Optional[str]) -> str:
@@ -219,6 +229,127 @@ class GRNRequest(BaseModel):
         return self.gr_number or self.grn_number or ""
 
 
+def _reset_mock_sap_data(
+    mode: ResetMode,
+    request: MockSAPResetRequest,
+) -> MockSAPResetResponse:
+    global INVOICES, POS, GRNS, POSTED_INVOICES
+
+    correlation_id = request.correlation_id or uuid.uuid4().hex
+    relevant_paths = [
+        INVOICE_JSON_PATH,
+        POSTED_INVOICE_JSON_PATH,
+    ]
+    if mode == ResetMode.MASTER:
+        relevant_paths.extend([PO_JSON_PATH, GRN_JSON_PATH])
+    _validate_reset_paths(relevant_paths)
+
+    # Reload files at reset time so a long-running API process never leaves
+    # externally synchronized JSON records behind because of stale globals.
+    INVOICES = load_json_list(INVOICE_JSON_PATH)
+    POS = load_json_list(PO_JSON_PATH)
+    GRNS = load_json_list(GRN_JSON_PATH)
+    POSTED_INVOICES = load_json_list(POSTED_INVOICE_JSON_PATH)
+    snapshots = {
+        "invoices": list(INVOICES),
+        "purchase_orders": list(POS),
+        "grns": list(GRNS),
+        "posted_invoices": list(POSTED_INVOICES),
+    }
+    targets = {
+        "invoices": INVOICE_JSON_PATH,
+        "posted_invoices": POSTED_INVOICE_JSON_PATH,
+    }
+    if mode == ResetMode.MASTER:
+        targets.update(
+            {
+                "purchase_orders": PO_JSON_PATH,
+                "grns": GRN_JSON_PATH,
+            }
+        )
+
+    deleted = MockSAPDeletedCounts(
+        purchase_orders=(
+            len(snapshots["purchase_orders"])
+            if mode == ResetMode.MASTER
+            else 0
+        ),
+        grns=(
+            len(snapshots["grns"])
+            if mode == ResetMode.MASTER
+            else 0
+        ),
+        posted_invoices=len(snapshots["posted_invoices"]),
+        other_records=len(snapshots["invoices"]),
+        files=sum(1 for key in targets if snapshots[key]),
+    )
+    retained = (
+        {}
+        if mode == ResetMode.MASTER
+        else {
+            "purchase_orders": len(POS),
+            "grns": len(GRNS),
+        }
+    )
+    if request.dry_run:
+        return MockSAPResetResponse(
+            success=True,
+            reset_mode=mode,
+            deleted=MockSAPDeletedCounts(),
+            retained=retained,
+            warnings=["Preflight only; no Mock SAP records were deleted."],
+            correlation_id=correlation_id,
+        )
+
+    try:
+        for key, path in targets.items():
+            save_json_file(path, [])
+        INVOICES = []
+        POSTED_INVOICES = []
+        if mode == ResetMode.MASTER:
+            POS = []
+            GRNS = []
+    except Exception:
+        INVOICES = snapshots["invoices"]
+        POS = snapshots["purchase_orders"]
+        GRNS = snapshots["grns"]
+        POSTED_INVOICES = snapshots["posted_invoices"]
+        for key, path in {
+            "invoices": INVOICE_JSON_PATH,
+            "purchase_orders": PO_JSON_PATH,
+            "grns": GRN_JSON_PATH,
+            "posted_invoices": POSTED_INVOICE_JSON_PATH,
+        }.items():
+            save_json_file(path, snapshots[key])
+        raise
+
+    return MockSAPResetResponse(
+        success=True,
+        reset_mode=mode,
+        deleted=deleted,
+        retained=retained,
+        warnings=[],
+        correlation_id=correlation_id,
+        completed_at=datetime.now(timezone.utc),
+    )
+
+
+def _validate_reset_paths(paths: list[Path]) -> None:
+    for path in paths:
+        if not path.parent.exists() or not os.access(path.parent, os.W_OK):
+            raise HTTPException(
+                status_code=500,
+                detail=f"Mock reset directory is not writable: {path.parent}",
+            )
+        if path.exists() and not (
+            os.access(path, os.R_OK) and os.access(path, os.W_OK)
+        ):
+            raise HTTPException(
+                status_code=500,
+                detail=f"Mock reset file is not accessible: {path}",
+            )
+
+
 # ---------------------------
 # INITIAL DATA LOAD
 # ---------------------------
@@ -239,6 +370,28 @@ def health():
         "status": "ok",
         "timestamp": datetime.now().isoformat()
     }
+
+
+@app.post(
+    MOCK_SAP_INVOICE_FLOW_RESET_ROUTE,
+    response_model=MockSAPResetResponse,
+)
+def reset_invoice_flow(
+    request: MockSAPResetRequest,
+    auth=Depends(verify_sap),
+):
+    return _reset_mock_sap_data(ResetMode.INVOICE_FLOW, request)
+
+
+@app.post(
+    MOCK_SAP_MASTER_RESET_ROUTE,
+    response_model=MockSAPResetResponse,
+)
+def reset_master(
+    request: MockSAPResetRequest,
+    auth=Depends(verify_sap),
+):
+    return _reset_mock_sap_data(ResetMode.MASTER, request)
 
 #------------DELETE INVOICE ----------
 

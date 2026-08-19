@@ -129,6 +129,26 @@ REQUIRED_INVOICE_COLUMNS = {
     "payment_status",
     "raw_payment_status",
 }
+REQUIRED_LEDGER_COLUMNS = {
+    "invoice_id",
+    "invoice_number",
+    "business_invoice_key",
+    "company_code",
+    "fiscal_year",
+    "po_number",
+    "po_item",
+    "active_key",
+    "grn_number",
+    "quantity",
+    "amount",
+    "ledger_status",
+}
+REQUIRED_LEDGER_INDEXES = {
+    "ix_po_grn_consumption_ledger_invoice_id",
+    "ix_po_grn_consumption_ledger_po_number",
+    "ix_po_grn_ledger_business_invoice_key",
+    "uq_po_grn_active_business_reservation",
+}
 
 
 def _database_mode(url: str) -> str:
@@ -240,6 +260,36 @@ def main() -> int:
                 print(
                     "[SUCCESS] All required invoice status columns exist."
                 )
+            missing_ledger_columns = _missing_columns(
+                agent_engine,
+                "po_grn_consumption_ledger",
+                REQUIRED_LEDGER_COLUMNS,
+            )
+            if missing_ledger_columns:
+                success = False
+                print(
+                    "[FAILURE] Missing PO/GRN ledger columns: "
+                    + ", ".join(missing_ledger_columns)
+                )
+            else:
+                print("[SUCCESS] Required PO/GRN ledger columns exist.")
+            ledger_indexes = {
+                item["name"]
+                for item in inspect(agent_engine).get_indexes(
+                    "po_grn_consumption_ledger"
+                )
+            }
+            missing_ledger_indexes = sorted(
+                REQUIRED_LEDGER_INDEXES - ledger_indexes
+            )
+            if missing_ledger_indexes:
+                success = False
+                print(
+                    "[FAILURE] Missing PO/GRN ledger indexes: "
+                    + ", ".join(missing_ledger_indexes)
+                )
+            else:
+                print("[SUCCESS] Required PO/GRN ledger indexes exist.")
     except Exception as exc:
         success = False
         print(

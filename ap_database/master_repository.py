@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
+from pathlib import Path
 
-import pandas as pd
-from sqlalchemy import delete, inspect, select, text, update
+from sqlalchemy import delete, func, inspect, select, text, update
 from sqlalchemy.engine import Connection
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -23,6 +24,16 @@ from ap_database.master_models import (
     MasterBase,
 )
 from ap_database.settings import is_postgres_url, settings
+
+AGENT_APP_ROOT = Path(__file__).resolve().parents[1] / "agent_app"
+if str(AGENT_APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(AGENT_APP_ROOT))
+
+from app.services.date_normalization_service import normalize_date
+from app.services.payment_terms_control import calculate_due_date
+from ap_database.extraction_confidence import (
+    canonicalize_extraction_confidence,
+)
 
 ALLOWED_MASTER_TABLES = frozenset(MASTER_TABLE_MODELS)
 
@@ -135,16 +146,7 @@ def _qualified_table_name(table_name: str) -> str:
 
 
 def _as_date(value: Any) -> date | None:
-    if value in (None, ""):
-        return None
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    try:
-        return date.fromisoformat(str(value)[:10])
-    except ValueError:
-        return None
+    return normalize_date(value).normalized_date
 
 
 def _as_datetime(value: Any) -> datetime | None:
@@ -268,10 +270,69 @@ def _merge_raw_json(
         if value not in (None, ""):
             merged[key] = value
 
-    for key in ("payment_terms", "due_date", "vendor_number"):
-        value = _clean_text(payload.get(key))
-        if value:
+    for key in (
+        "payment_terms",
+        "due_date",
+        "vendor_number",
+        "confidence",
+        "extraction_confidence",
+        "field_confidence",
+        "warnings",
+        "ocr_provider",
+        "ocr_version",
+        "extraction_provider",
+        "extraction_model",
+        "model",
+        "prompt_version",
+        "schema_version",
+        "retry_count",
+        "vendor_number_genuinely_extracted",
+    ):
+        value = payload.get(key)
+        if key not in {
+            "confidence",
+            "extraction_confidence",
+            "field_confidence",
+            "warnings",
+            "retry_count",
+            "vendor_number_genuinely_extracted",
+        }:
+            value = _clean_text(value)
+        if value not in (None, ""):
             merged[key] = value
+    if payload.get("invoice_date") not in (None, ""):
+        merged["raw_invoice_date"] = _json_safe(payload["invoice_date"])
+    if payload.get("currency") not in (None, ""):
+        merged["raw_currency"] = _json_safe(payload["currency"])
+
+    confidence = canonicalize_extraction_confidence({
+        **merged,
+        **{
+            key: value
+            for key, value in payload.items()
+            if value not in (None, "")
+        },
+    })
+    confidence_data = confidence.to_dict()
+    merged["extraction_confidence"] = (
+        confidence.extraction_confidence
+    )
+    merged["extraction_confidence_source"] = (
+        confidence.confidence_source
+    )
+    merged["confidence_supplied"] = confidence.confidence_supplied
+    merged["field_confidence"] = confidence.field_confidence
+    merged["warnings"] = confidence.warnings
+    merged["ocr_provider"] = confidence.ocr_provider
+    merged["ocr_version"] = confidence.ocr_version
+    merged["extraction_provider"] = confidence.extraction_provider
+    merged["extraction_model"] = confidence.extraction_model
+    merged["extraction_version"] = confidence.extraction_version
+    merged["extraction_attempt_number"] = confidence.attempt_number
+    merged["retry_count"] = confidence.retry_count
+    merged["raw_extraction_quality_evidence"] = confidence_data[
+        "raw_quality_evidence"
+    ]
 
     terms = _first_non_empty(
         _normalize_payment_terms(merged.get("payment_terms")),
@@ -430,9 +491,15 @@ def _backfill_local_sqlite_payment_terms(connection: Connection) -> None:
         if "payment_terms" not in columns or "raw_json" not in columns:
             continue
 
+        date_columns = (
+            ', "invoice_date", "due_date"'
+            if {"invoice_date", "due_date"}.issubset(columns)
+            else ""
+        )
         rows = connection.execute(
             text(
-                f'SELECT "{primary_key}", "payment_terms", "raw_json" '
+                f'SELECT "{primary_key}", "payment_terms", "raw_json"'
+                f'{date_columns} '
                 f'FROM "{table_name}"'
             )
         ).mappings().all()
@@ -456,6 +523,13 @@ def _backfill_local_sqlite_payment_terms(connection: Connection) -> None:
             updates = {}
             if terms != row.get("payment_terms"):
                 updates["payment_terms"] = terms
+            if date_columns and row.get("due_date") in (None, ""):
+                calculated_due_date = calculate_due_date(
+                    row.get("invoice_date"),
+                    terms,
+                )
+                if calculated_due_date is not None:
+                    updates["due_date"] = calculated_due_date.isoformat()
             if raw_json.get("payment_terms") != terms:
                 raw_json["payment_terms"] = terms
                 updates["raw_json"] = json.dumps(raw_json, default=str)
@@ -492,7 +566,9 @@ def get_table_count(table_name: str) -> int:
     return int(value)
 
 
-def load_table_data(table_name: str, limit: int = 10) -> pd.DataFrame:
+def load_table_data(table_name: str, limit: int = 10) -> "pd.DataFrame":
+    import pandas as pd
+
     """Load recent rows from one allowlisted master table."""
     model = _get_model(table_name)
     qualified_name = _qualified_table_name(table_name)
@@ -527,21 +603,25 @@ def upsert_invoice(
     )
     values = _common_document_values(payload, existing)
     raw_json = values["raw_json"]
+    invoice_date = _as_date(payload.get("invoice_date"))
+    payment_terms = _first_non_empty(
+        _normalize_payment_terms(payload.get("payment_terms")),
+        raw_json.get("payment_terms") if isinstance(raw_json, dict) else None,
+        existing.get("payment_terms"),
+    )
+    supplied_due_date = _first_non_empty(
+        payload.get("due_date"),
+        raw_json.get("due_date") if isinstance(raw_json, dict) else None,
+        existing.get("due_date"),
+    )
     values.update(
         invoice_number=payload.get("invoice_number"),
-        invoice_date=_as_date(payload.get("invoice_date")),
-        due_date=_as_date(
-            _first_non_empty(
-                payload.get("due_date"),
-                raw_json.get("due_date") if isinstance(raw_json, dict) else None,
-                existing.get("due_date"),
-            )
+        invoice_date=invoice_date,
+        due_date=(
+            _as_date(supplied_due_date)
+            or calculate_due_date(invoice_date, payment_terms)
         ),
-        payment_terms=_first_non_empty(
-            _normalize_payment_terms(payload.get("payment_terms")),
-            raw_json.get("payment_terms") if isinstance(raw_json, dict) else None,
-            existing.get("payment_terms"),
-        ),
+        payment_terms=payment_terms,
         payment_status=payload.get("payment_status"),
         last_modified=_as_datetime(payload.get("last_modified")),
     )
@@ -772,7 +852,39 @@ def keep_latest_rows(table_name: str, keep_count: int) -> None:
         connection.execute(statement)
 
 
-def reset_demo_environment() -> dict[str, str]:
+def reset_invoice_flow_data() -> dict[str, Any]:
+    """Clear invoice data while retaining PO and GRN reference rows."""
+    require_destructive_master_reset_allowed("reset invoice flow")
+    engine = get_master_engine()
+    delete_order = (
+        "invoice_master",
+        "sap_posted_invoice_master",
+    )
+    deleted: dict[str, int] = {}
+    retained: dict[str, int] = {}
+    with engine.begin() as connection:
+        for table_name in delete_order:
+            result = connection.execute(
+                delete(_get_model(table_name).__table__)
+            )
+            deleted[table_name] = int(result.rowcount or 0)
+        for table_name in ("sap_po_master", "sap_grn_master"):
+            retained[table_name] = int(
+                connection.scalar(
+                    select(func.count()).select_from(
+                        _get_model(table_name).__table__
+                    )
+                )
+                or 0
+            )
+    return {
+        "status": "success",
+        "deleted": deleted,
+        "retained": retained,
+    }
+
+
+def reset_demo_environment() -> dict[str, Any]:
     """Clear all master tables in one database transaction."""
     require_destructive_master_reset_allowed("reset demo environment")
 
@@ -784,8 +896,16 @@ def reset_demo_environment() -> dict[str, str]:
         "sap_grn_master",
     )
 
+    deleted: dict[str, int] = {}
     with engine.begin() as connection:
         for table_name in delete_order:
-            connection.execute(delete(_get_model(table_name).__table__))
+            result = connection.execute(
+                delete(_get_model(table_name).__table__)
+            )
+            deleted[table_name] = int(result.rowcount or 0)
 
-    return {"status": "success"}
+    return {
+        "status": "success",
+        "deleted": deleted,
+        "retained": {},
+    }

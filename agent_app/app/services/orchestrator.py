@@ -42,7 +42,10 @@ from app.services.po_grn_consumption_ledger_service import (
     POGRNConsumptionLedgerService,
 )
 from app.services.tax_validation_control import TaxValidationControl
-from app.services.payment_terms_control import PaymentTermsControl
+from app.services.payment_terms_control import (
+    PaymentTermsControl,
+    calculate_due_date,
+)
 from app.services.exception_summary_service import (
     ExceptionSummaryService,
     owner_for_category,
@@ -68,14 +71,25 @@ from ingestion.master_ingestion import (
     upsert_posted_invoice,
 )
 from ap_database.master_repository import update_payment_terms
+from ap_database.engines import get_master_engine
+from ap_database.workflow_master_repository import WorkflowMasterRepository
 
 logger = logging.getLogger(__name__)
 
 
 class APOrchestrator:
-    def __init__(self, db: Session):
+    def __init__(
+        self,
+        db: Session,
+        master_repository: WorkflowMasterRepository | None = None,
+        sap_gateway=None,
+    ):
         self.db = db
-        self.sap = get_sap_gateway()
+        self.master_repository = (
+            master_repository
+            or WorkflowMasterRepository(get_master_engine())
+        )
+        self.sap = sap_gateway or get_sap_gateway(self.master_repository)
         self.posting = get_posting_gateway()
         self.llm = get_llm_client()
         self.validator = APValidationEngine()
@@ -693,13 +707,19 @@ class APOrchestrator:
         """
         results = self.validator.validate(invoice, context)
         results.extend(
-            DuplicateInvoiceControl(self.db).evaluate(invoice)
+            DuplicateInvoiceControl(
+                self.db,
+                master_repository=self.master_repository,
+            ).evaluate(invoice)
         )
         results.extend(
             InvoiceFinancialControl().evaluate(invoice)
         )
         results.extend(
-            PO_GRNConsumptionControl(self.db).evaluate(
+            PO_GRNConsumptionControl(
+                self.db,
+                master_repository=self.master_repository,
+            ).evaluate(
                 invoice,
                 context,
                 )
@@ -891,6 +911,10 @@ class APOrchestrator:
         context = context or {}
         po = context.get("po") or {}
         payment_terms = invoice.payment_terms or po.get("payment_terms")
+        due_date = invoice.due_date or calculate_due_date(
+            invoice.invoice_date,
+            payment_terms,
+        )
 
         return {
             "document_type": "posted_invoice",
@@ -898,6 +922,11 @@ class APOrchestrator:
             "po_number": invoice.po_number or "",
             "vendor_name": invoice.vendor_name,
             "invoice_date": invoice.invoice_date.isoformat(),
+            "due_date": (
+                due_date.isoformat()
+                if due_date is not None
+                else None
+            ),
             "currency": invoice.currency,
             "document_subtotal": invoice.subtotal,
             "tax_amount": invoice.tax_amount,

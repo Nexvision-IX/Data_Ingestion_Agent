@@ -1,11 +1,15 @@
-﻿
-import json
+﻿import json
+import os
+import re
+import shutil
 import uuid
 from datetime import datetime
 from pathlib import Path
 
 import requests
 import streamlit as st
+from sqlalchemy import inspect, text as sql_text
+from sqlalchemy.engine import make_url
 from ap_storage import (
     InvoiceArtifactBundle,
     get_storage_service,
@@ -18,8 +22,18 @@ from ap_database.agent_monitor_repository import (
     load_ap_agent_summary,
     load_ap_agent_validation_results,
 )
-from ap_database.master_repository import get_table_count, load_table_data
-from ap_database.settings import settings as database_settings
+from ap_database.engines import get_agent_engine, get_master_engine
+from ap_database.agent_artifact_models import ArtifactBase
+from ap_database.master_repository import (
+    get_table_count,
+    load_table_data,
+    reset_demo_environment as reset_master_tables,
+)
+from ap_database.settings import is_postgres_url, settings as database_settings
+from ap_database.extraction_confidence import (
+    canonicalize_extraction_confidence,
+)
+from ap_storage.settings import load_storage_settings
 from ingestion.master_ingestion import (
 
     delete_invoice,
@@ -33,7 +47,8 @@ from ingestion.master_ingestion import (
     clear_grn_table,
 
     keep_latest_rows,
-    reset_demo_environment,
+    reset_invoice_flow_data,
+    STATE_FILE,
 
     init_db,
     get_conn,
@@ -42,51 +57,135 @@ from ingestion.master_ingestion import (
 
 from ingestion.ap_agent_trigger import trigger_ap_agent_process_new
 from pipeline_runner import process_invoice_pipeline, sync_structured_sources
+from agent_app.app.services.demo_reset_service import (
+    reset_agent_invoice_flow,
+)
+from agent_app.app.services.payment_terms_control import calculate_due_date
+from reset_client import (
+    MockSAPResetClientError,
+    call_mock_api_admin_reset,
+)
+from reset_contract import ResetMode, mock_sap_base_url
+from reset_workflow import run_staged_reset
 
 # -----------------------------------
 # DATABASE PATH
 # -----------------------------------
 
-import os
 from dotenv import load_dotenv
 
 load_dotenv()
 
-APP_ROOT = Path(__file__).resolve().parent
-DEFAULT_AGENT_DB_PATH = APP_ROOT / "agent_app" / "ap_agent.db"
-DEFAULT_INPUT_DIR = APP_ROOT / "unstructured_ingestion" / "unstructured_inputs"
-
 SAP_API_PORT = int(os.getenv("SAP_API_PORT", "8001"))
-API_BASE_URL = os.getenv(
-    "MOCK_API_BASE_URL",
-    f"http://127.0.0.1:{SAP_API_PORT}",
-).rstrip("/")
+API_BASE_URL = mock_sap_base_url()
 SAP_USERNAME = os.getenv(
     "SAP_USERNAME",
-    ""
+    "sap_user"
 )
 
 SAP_PASSWORD = os.getenv(
     "SAP_PASSWORD",
-    ""
+    "sap_pass"
 )
+
+AGENT_API_PORT = int(os.getenv("AGENT_API_PORT", "8000"))
+AP_AGENT_BASE_URL = os.getenv(
+    "AGENT_API_BASE_URL",
+    os.getenv("AP_AGENT_BASE_URL", f"http://127.0.0.1:{AGENT_API_PORT}"),
+).rstrip("/")
+EXCEPTION_RESPONSE_ENDPOINT_TEMPLATE = "/api/v1/exceptions/{exception_id}/responses"
+CONTROLLED_RECHECK_ENDPOINT_TEMPLATE = "/api/v1/invoices/{invoice_id}/recheck"
+
+# Common ISO 4217 currencies supported by the manual document-entry forms.
+CURRENCY_OPTIONS = [
+    "INR",
+    "USD",
+    "EUR",
+    "GBP",
+    "AED",
+    "AUD",
+    "CAD",
+    "CHF",
+    "CNY",
+    "HKD",
+    "JPY",
+    "KRW",
+    "MYR",
+    "NZD",
+    "SAR",
+    "SEK",
+    "SGD",
+    "THB",
+    "ZAR",
+]
+# -----------------------------------
+# LOCAL SQLITE FOLDER SAFETY
+# -----------------------------------
+
+def ensure_local_sqlite_parent_dirs():
+    """Create parent folders for local SQLite database files.
+
+    This prevents the common local error:
+    sqlite3.OperationalError: unable to open database file
+
+    Example affected URL: sqlite:///./data/master/ap_master.db
+    """
+    for database_url in {
+        database_settings.database_url,
+        database_settings.master_database_url,
+    }:
+        if not database_url or not database_url.strip().lower().startswith("sqlite"):
+            continue
+
+        try:
+            parsed_url = make_url(database_url)
+            database_path = parsed_url.database
+        except Exception:
+            continue
+
+        if not database_path or database_path == ":memory":
+            continue
+
+        db_file = Path(database_path)
+        if not db_file.is_absolute():
+            db_file = Path.cwd() / db_file
+
+        db_file.parent.mkdir(parents=True, exist_ok=True)
+
+
+ensure_local_sqlite_parent_dirs()
+
+
+def ensure_agent_artifact_schema():
+    """Create the invoice_artifacts table if it is missing.
+
+    Streamlit saves upload/OCR artifact metadata before the AP Agent
+    finishes processing the invoice. In a fresh local SQLite database, this
+    table may not exist yet, so we create it non-destructively at startup.
+    This also works against RDS later because create_all only creates missing
+    tables and does not delete data.
+    """
+    try:
+        ArtifactBase.metadata.create_all(bind=get_agent_engine())
+    except Exception as exc:
+        st.warning(
+            "Invoice artifact table could not be initialized automatically. "
+            "Run: python scripts/init_rds_schema.py. "
+            f"Details: {type(exc).__name__}: {exc}"
+        )
+
+
+ensure_agent_artifact_schema()
+
 # -----------------------------------
 # INPUT DIRECTORY
 # -----------------------------------
 
-def resolve_path_from_env(env_name, default_path):
-    configured = os.getenv(env_name)
-    if not configured:
-        return Path(default_path)
-    path = Path(configured)
-    if path.is_absolute():
-        return path
-    return APP_ROOT / path
-
-
-INPUT_DIR = resolve_path_from_env(
-    "UNSTRUCTURED_INPUT_DIR",
-    DEFAULT_INPUT_DIR,
+INPUT_DIR = Path(
+    os.getenv(
+        "UNSTRUCTURED_INPUT_DIR",
+        "unstructured_ingestion/unstructured_inputs"
+    )
 )
 
 INPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -132,121 +231,1654 @@ def show_master_reset_blocked_message():
     )
 
 
-def clean_invoice_demo_run_only(clear_posted_references=False):
-    result = {
-        "invoice_master_cleared": False,
-        "posted_references_cleared": False,
-        "agent_db_deleted_paths": [],
-        "agent_db_delete_errors": [],
-        "uploaded_files_deleted_count": 0,
-        "po_grn_preserved": True,
-        "message": "",
-    }
+def env_bool(name, default=False):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
-    if not database_settings.allow_destructive_master_reset:
-        result["status"] = "blocked"
-        result["message"] = (
-            "Destructive cleanup is disabled. Enable the local demo reset "
-            "flag before running cleanup."
+
+def is_local_demo_runtime():
+    return (
+        database_settings.app_env.strip().lower()
+        not in {"production", "prod", "staging", "stage", "demo", "aws"}
+        and not is_postgres_url(database_settings.database_url)
+    )
+
+
+def agent_reset_allowed():
+    return env_bool(
+        "ALLOW_DESTRUCTIVE_AGENT_RESET",
+        default=is_local_demo_runtime(),
+    )
+
+
+def show_agent_reset_blocked_message():
+    st.error(
+        "AP Agent reset is disabled. Set "
+        "ALLOW_DESTRUCTIVE_AGENT_RESET=true only for an intentional "
+        "local/demo reset."
+    )
+
+
+def reset_ap_agent_tables():
+    """Clear AP Agent monitor tables without dropping the schema."""
+    if not agent_reset_allowed():
+        raise RuntimeError(
+            "ALLOW_DESTRUCTIVE_AGENT_RESET is not enabled."
         )
-        return result
 
-    try:
-        init_db()
-        clear_invoice_table()
-        result["invoice_master_cleared"] = True
-        if clear_posted_references:
-            clear_posted_invoice_table()
-            result["posted_references_cleared"] = True
-    except Exception as exc:
-        result["status"] = "failed"
-        result["message"] = f"Master database cleanup failed: {exc}"
-        result["master_cleanup_error"] = str(exc)
-        return result
+    engine = get_agent_engine()
+    deleted_rows = reset_agent_invoice_flow(engine)
 
-    agent_db_candidates = {
-        resolve_path_from_env("AP_AGENT_DB_PATH", DEFAULT_AGENT_DB_PATH)
+    return {
+        "status": "success",
+        "deleted_rows": deleted_rows,
     }
+
+
+def clear_demo_runtime_files():
+    """Remove generated demo files while keeping checked-in sample inputs."""
+    removed = []
+    generated_upload_pattern = re.compile(
+        r"^\d{8}_\d{6}_[0-9a-fA-F]{8}"
+    )
+
+    def remove_path(path: Path):
+        if not path.exists():
+            return
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+        removed.append(str(path))
+
+    # Uploaded files: remove only generated timestamp/uuid files, not sample PDFs.
+    if INPUT_DIR.exists():
+        for child in INPUT_DIR.iterdir():
+            if generated_upload_pattern.match(child.name):
+                remove_path(child)
+
+    # Generated OCR / AI extraction outputs can be cleared safely.
+    generated_dirs = [
+        Path("unstructured_ingestion/extracted_text"),
+        Path("unstructured_ingestion/extracted_json"),
+        Path("unstructured_ingestion/structured_debug"),
+    ]
+    for directory in generated_dirs:
+        if directory.exists():
+            for child in directory.iterdir():
+                remove_path(child)
+
+    processed_file = Path("unstructured_ingestion/processed_files.json")
+    if processed_file.exists():
+        processed_file.write_text("{}", encoding="utf-8")
+
+    # Local artifact storage is runtime output. Do not delete S3 contents from UI.
     try:
-        for path in APP_ROOT.rglob("ap_agent.db"):
-            agent_db_candidates.add(path)
-    except Exception as exc:
-        result["agent_db_delete_errors"].append(
+        storage_settings = load_storage_settings()
+        if storage_settings.backend == "local" and storage_settings.local_root.exists():
+            for child in storage_settings.local_root.iterdir():
+                remove_path(child)
+    except Exception:
+        # File cleanup should not block database reset.
+        pass
+
+    return {
+        "status": "success",
+        "files_removed": len(removed),
+        "paths_removed": removed[:20],
+    }
+
+
+def reset_structured_sync_watermark():
+    """Reset structured sync watermark so PO/GRN sync can reload reference data."""
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.write_text(
+        json.dumps({"last_run_time": None}, indent=4),
+        encoding="utf-8",
+    )
+    return {"status": "success", "state_file": str(STATE_FILE)}
+
+
+def preflight_admin_reset(
+    reset_mode,
+    *,
+    clear_files=True,
+    correlation_id=None,
+):
+    """Validate every reset dependency before any destructive stage."""
+    mode = ResetMode(reset_mode)
+    environment = database_settings.app_env.strip().lower()
+    if environment in {"production", "prod", "staging", "stage", "aws"}:
+        raise RuntimeError(
+            f"Demo reset is prohibited in environment '{environment}'."
+        )
+    if not database_settings.allow_destructive_master_reset:
+        raise RuntimeError(
+            "ALLOW_DESTRUCTIVE_MASTER_RESET is not enabled."
+        )
+    if not agent_reset_allowed():
+        raise RuntimeError(
+            "ALLOW_DESTRUCTIVE_AGENT_RESET is not enabled."
+        )
+
+    agent_engine = get_agent_engine()
+    master_engine = get_master_engine()
+    with agent_engine.connect() as connection:
+        connection.execute(sql_text("SELECT 1"))
+    with master_engine.connect() as connection:
+        connection.execute(sql_text("SELECT 1"))
+
+    agent_tables = set(inspect(agent_engine).get_table_names())
+    master_tables = set(inspect(master_engine).get_table_names())
+    required_agent = {"invoices", "po_grn_consumption_ledger"}
+    required_master = {
+        "invoice_master",
+        "sap_posted_invoice_master",
+        "sap_po_master",
+        "sap_grn_master",
+    }
+    missing_agent = sorted(required_agent - agent_tables)
+    missing_master = sorted(required_master - master_tables)
+    if missing_agent or missing_master:
+        raise RuntimeError(
+            "Reset database preflight failed. Missing tables: "
+            + ", ".join(missing_agent + missing_master)
+        )
+
+    state_parent = Path(STATE_FILE).parent
+    if not state_parent.exists() or not os.access(state_parent, os.W_OK):
+        raise RuntimeError(
+            f"Reset state directory is not writable: {state_parent}"
+        )
+    if clear_files:
+        for directory in (
+            INPUT_DIR,
+            Path("unstructured_ingestion/extracted_json"),
+            Path("unstructured_ingestion/extracted_text"),
+            Path("unstructured_ingestion/structured_debug"),
+        ):
+            if directory.exists() and not os.access(directory, os.W_OK):
+                raise RuntimeError(
+                    f"Reset file directory is not writable: {directory}"
+                )
+
+    mock_result = call_mock_api_admin_reset(
+        mode,
+        dry_run=True,
+        correlation_id=correlation_id,
+        auth=(SAP_USERNAME, SAP_PASSWORD),
+    )
+    return {
+        "environment": environment,
+        "agent_reset_available": True,
+        "master_database_accessible": True,
+        "agent_database_accessible": True,
+        "state_files_accessible": True,
+        "mock_sap_endpoint": mock_result,
+    }
+
+
+def _file_reset_stage(clear_files, *, reset_watermark=True):
+    return {
+        "watermark": (
+            reset_structured_sync_watermark()
+            if reset_watermark
+            else {"status": "kept"}
+        ),
+        "runtime_files": (
+            clear_demo_runtime_files()
+            if clear_files
+            else {"status": "skipped", "files_removed": 0}
+        ),
+    }
+
+
+def _run_admin_reset(
+    reset_mode,
+    *,
+    clear_files=True,
+    resume_result=None,
+):
+    mode = ResetMode(reset_mode)
+    correlation_id = (
+        (resume_result or {}).get("correlation_id")
+        or uuid.uuid4().hex
+    )
+    if mode == ResetMode.INVOICE_FLOW:
+        master_operation = reset_invoice_flow_data
+    else:
+        master_operation = reset_master_tables
+
+    return run_staged_reset(
+        reset_mode=mode.value,
+        correlation_id=correlation_id,
+        resume_result=resume_result,
+        preflight=lambda: preflight_admin_reset(
+            mode,
+            clear_files=clear_files,
+            correlation_id=correlation_id,
+        ),
+        operations=[
+            ("MASTER_DATABASE_RESET", master_operation),
+            (
+                "AP_AGENT_RESET",
+                lambda: {
+                    "status": "success",
+                    "deleted_rows": reset_agent_invoice_flow(
+                        get_agent_engine()
+                    ),
+                },
+            ),
+            (
+                "MOCK_SAP_RESET",
+                lambda: call_mock_api_admin_reset(
+                    mode,
+                    correlation_id=correlation_id,
+                    auth=(SAP_USERNAME, SAP_PASSWORD),
+                ),
+            ),
+            (
+                "FILE_RESET",
+                lambda: _file_reset_stage(clear_files),
+            ),
+        ],
+    )
+
+
+def reset_invoice_flow_environment(
+    clear_files=True,
+    resume_result=None,
+):
+    """
+    Client-demo reset that keeps PO and GRN reference data intact.
+
+    Clears only invoice-flow data: source/uploaded invoices, posted invoices,
+    AP Agent records, local runtime artifacts, and invoice-related mock API JSON.
+    """
+    return _run_admin_reset(
+        ResetMode.INVOICE_FLOW,
+        clear_files=clear_files,
+        resume_result=resume_result,
+    )
+
+
+def reset_master_demo_environment(
+    clear_files=True,
+    resume_result=None,
+):
+    """Master reset that clears all demo data, including PO and GRN reference data."""
+    return _run_admin_reset(
+        ResetMode.MASTER,
+        clear_files=clear_files,
+        resume_result=resume_result,
+    )
+
+
+def _reset_summary_counts(result):
+    deleted = {}
+    retained = {}
+    for stage in result.get("stages", {}).values():
+        details = stage.get("details") or {}
+        for key, value in (details.get("deleted") or {}).items():
+            deleted[key] = deleted.get(key, 0) + int(value or 0)
+        for key, value in (details.get("deleted_rows") or {}).items():
+            deleted[key] = deleted.get(key, 0) + int(value or 0)
+        for key, value in (details.get("retained") or {}).items():
+            retained[key] = int(value or 0)
+        runtime_files = details.get("runtime_files") or {}
+        if runtime_files.get("files_removed") is not None:
+            deleted["runtime_files"] = int(
+                runtime_files.get("files_removed") or 0
+            )
+    return deleted, retained
+
+
+def _render_reset_failure(result):
+    deleted, retained = _reset_summary_counts(result)
+    st.error(
+        f"{result.get('reset_mode', 'Reset')} reset did not complete. "
+        f"Failed stage: {result.get('failed_stage') or 'unknown'}."
+    )
+    st.write(
+        {
+            "reset_mode": result.get("reset_mode"),
+            "completed_stages": result.get("completed_stages", []),
+            "failed_stage": result.get("failed_stage"),
+            "deleted": deleted,
+            "retained": retained,
+            "retry_guidance": result.get("retry_guidance"),
+        }
+    )
+    if database_settings.app_env.strip().lower() not in {
+        "production",
+        "prod",
+        "staging",
+        "stage",
+        "aws",
+    }:
+        with st.expander("Technical details"):
+            st.json(result.get("technical_details") or {})
+
+
+def _handle_reset_result(result, *, clear_files):
+    if result.get("success"):
+        deleted, retained = _reset_summary_counts(result)
+        ledger_rows = deleted.get("po_grn_consumption_ledger", 0)
+        st.session_state.pop("demo_reset_pending", None)
+        st.session_state["demo_reset_success"] = (
+            f"{result['reset_mode']} reset completed. Removed "
+            f"{ledger_rows} PO/GRN consumption ledger row(s)."
+        )
+        st.session_state["demo_reset_result"] = {
+            **result,
+            "deleted": deleted,
+            "retained": retained,
+        }
+        st.cache_data.clear()
+        st.rerun()
+        return
+
+    st.session_state["demo_reset_pending"] = {
+        "reset_mode": result.get("reset_mode"),
+        "clear_files": clear_files,
+        "result": result,
+    }
+    _render_reset_failure(result)
+
+
+def _render_reset_retry(reset_mode, *, location):
+    pending = st.session_state.get("demo_reset_pending")
+    if not pending or pending.get("reset_mode") != reset_mode:
+        return
+    st.warning(
+        "A previous reset stopped after a partial failure. A retry will "
+        "execute only unfinished stages."
+    )
+    _render_reset_failure(pending.get("result") or {})
+    if st.button(
+        "Retry unfinished reset stages",
+        key=f"{location}_{reset_mode}_retry_reset",
+        use_container_width=True,
+    ):
+        clear_files = bool(pending.get("clear_files", True))
+        previous = pending.get("result")
+        result = (
+            reset_master_demo_environment(
+                clear_files=clear_files,
+                resume_result=previous,
+            )
+            if reset_mode == ResetMode.MASTER.value
+            else reset_invoice_flow_environment(
+                clear_files=clear_files,
+                resume_result=previous,
+            )
+        )
+        _handle_reset_result(result, clear_files=clear_files)
+
+
+def render_invoice_flow_reset_panel(location="sidebar"):
+    """Reset panel that keeps PO/GRN intact."""
+    st.caption(
+        "Use this before each client walkthrough. It clears invoice-flow data "
+        "but keeps PO and GRN reference data intact."
+    )
+    _render_reset_retry(
+        ResetMode.INVOICE_FLOW.value,
+        location=location,
+    )
+    clear_files = st.checkbox(
+        "Also clear uploaded/OCR demo files",
+        value=True,
+        key=f"{location}_invoice_flow_clear_demo_files",
+    )
+    confirm_text = st.text_input(
+        "Type RESET to enable the button",
+        key=f"{location}_invoice_flow_reset_confirm_text",
+        placeholder="RESET",
+    )
+    reset_disabled = confirm_text.strip().upper() != "RESET"
+
+    if st.button(
+        "Reset invoice demo flow",
+        key=f"{location}_reset_invoice_flow_btn",
+        disabled=reset_disabled,
+        type="primary",
+        use_container_width=True,
+    ):
+        if not database_settings.allow_destructive_master_reset:
+            show_master_reset_blocked_message()
+            return
+        if not agent_reset_allowed():
+            show_agent_reset_blocked_message()
+            return
+
+        with st.spinner("Resetting invoice demo flow and mock API invoice records..."):
+            result = reset_invoice_flow_environment(
+                clear_files=clear_files
+            )
+            _handle_reset_result(result, clear_files=clear_files)
+
+
+def render_master_reset_panel(location="admin"):
+    """Reset panel that deletes everything, including PO and GRN data."""
+    st.caption(
+        "Use this only when you want to completely wipe the demo database and "
+        "mock API JSON files, including PO and GRN records."
+    )
+    _render_reset_retry(
+        ResetMode.MASTER.value,
+        location=location,
+    )
+    clear_files = st.checkbox(
+        "Also clear uploaded/OCR demo files",
+        value=True,
+        key=f"{location}_master_clear_demo_files",
+    )
+    confirm_text = st.text_input(
+        "Type MASTER RESET to enable the button",
+        key=f"{location}_master_reset_confirm_text",
+        placeholder="MASTER RESET",
+    )
+    reset_disabled = confirm_text.strip().upper() != "MASTER RESET"
+
+    if st.button(
+        "Master reset everything",
+        key=f"{location}_master_reset_btn",
+        disabled=reset_disabled,
+        type="secondary",
+        use_container_width=True,
+    ):
+        if not database_settings.allow_destructive_master_reset:
+            show_master_reset_blocked_message()
+            return
+        if not agent_reset_allowed():
+            show_agent_reset_blocked_message()
+            return
+
+        with st.spinner("Running master reset across database, AP Agent, files and mock API..."):
+            result = reset_master_demo_environment(
+                clear_files=clear_files
+            )
+            _handle_reset_result(result, clear_files=clear_files)
+
+
+def get_safe_table_count(table_name):
+    try:
+        return get_table_count(table_name)
+    except Exception:
+        return 0
+
+
+def parse_items_cell(value):
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
+    return []
+
+
+def load_invoice_options(limit=200):
+    try:
+        invoice_df = load_table_data("invoice_master", limit=limit)
+    except Exception:
+        return []
+
+    if invoice_df.empty or "invoice_number" not in invoice_df.columns:
+        return []
+
+    return [
+        invoice
+        for invoice in invoice_df["invoice_number"].dropna().astype(str).tolist()
+        if invoice
+    ]
+
+
+def get_invoice_master_row(invoice_number):
+    if not invoice_number:
+        return None
+    try:
+        invoice_df = load_table_data("invoice_master", limit=500)
+    except Exception:
+        return None
+    if invoice_df.empty or "invoice_number" not in invoice_df.columns:
+        return None
+    rows = invoice_df[invoice_df["invoice_number"].astype(str) == str(invoice_number)]
+    if rows.empty:
+        return None
+    return rows.iloc[0].to_dict()
+
+
+def get_posted_invoice_master_row(invoice_number):
+    if not invoice_number:
+        return None
+    try:
+        posted_df = load_table_data("sap_posted_invoice_master", limit=500)
+    except Exception:
+        return None
+    if posted_df.empty or "invoice_number" not in posted_df.columns:
+        return None
+    rows = posted_df[posted_df["invoice_number"].astype(str) == str(invoice_number)]
+    if rows.empty:
+        return None
+    return rows.iloc[0].to_dict()
+
+
+def create_demo_reference_data_and_sync():
+    """Create one deterministic PO/GRN pair in the mock API, then sync to master."""
+    now = datetime.now().isoformat()
+    line_items = [
+        {
+            "line_no": 1,
+            "description": "Demo service subscription",
+            "qty": 1,
+            "unit_price": 1000.0,
+            "line_amount": 1000.0,
+        }
+    ]
+
+    po_payload = {
+        "document_type": "po",
+        "po_number": "PO-DEMO-1001",
+        "vendor_name": "Demo Supplier Pvt Ltd",
+        "po_date": datetime.now().date().isoformat(),
+        "currency": "INR",
+        "document_subtotal": 1000.0,
+        "tax_amount": 180.0,
+        "vat_percent": 18.0,
+        "document_total": 1180.0,
+        "amount": 1180.0,
+        "po_status": "Open",
+        "line_items": line_items,
+        "last_modified": now,
+    }
+
+    grn_payload = {
+        "document_type": "grn",
+        "gr_number": "GRN-DEMO-1001",
+        "po_number": "PO-DEMO-1001",
+        "vendor_name": "Demo Supplier Pvt Ltd",
+        "gr_date": datetime.now().date().isoformat(),
+        "currency": "INR",
+        "document_subtotal": 1000.0,
+        "document_total": 1000.0,
+        "amount": 1000.0,
+        "gr_status": "Received",
+        "line_items": line_items,
+        "last_modified": now,
+    }
+
+    po_response = requests.post(
+        f"{API_BASE_URL}/sap/po",
+        json=po_payload,
+        auth=(SAP_USERNAME, SAP_PASSWORD),
+        timeout=60,
+    )
+    grn_response = requests.post(
+        f"{API_BASE_URL}/sap/gr",
+        json=grn_payload,
+        auth=(SAP_USERNAME, SAP_PASSWORD),
+        timeout=60,
+    )
+
+    if po_response.status_code >= 400:
+        raise RuntimeError(f"Demo PO creation failed: {po_response.text}")
+    if grn_response.status_code >= 400:
+        raise RuntimeError(f"Demo GRN creation failed: {grn_response.text}")
+
+    reset_structured_sync_watermark()
+    sync_result = sync_structured_sources()
+
+    return {
+        "po_api": po_response.json(),
+        "grn_api": grn_response.json(),
+        "sync": sync_result,
+    }
+
+
+def build_demo_invoice_payload(invoice_number):
+    """Build a clean demo invoice using the demo PO/GRN reference data."""
+    po_row = None
+    try:
+        po_df = load_table_data("sap_po_master", limit=500)
+        if not po_df.empty and "po_number" in po_df.columns:
+            demo_rows = po_df[po_df["po_number"].astype(str) == "PO-DEMO-1001"]
+            if not demo_rows.empty:
+                po_row = demo_rows.iloc[0].to_dict()
+            else:
+                po_row = po_df.iloc[0].to_dict()
+    except Exception:
+        po_row = None
+
+    if po_row:
+        po_number = po_row.get("po_number") or "PO-DEMO-1001"
+        vendor_name = po_row.get("vendor_name") or "Demo Supplier Pvt Ltd"
+        currency = po_row.get("currency") or "INR"
+        subtotal = float(po_row.get("document_subtotal") or 1000.0)
+        tax_amount = float(po_row.get("tax_amount") or 180.0)
+        vat_percent = float(po_row.get("vat_percent") or 18.0)
+        document_total = float(po_row.get("document_total") or subtotal + tax_amount)
+        payment_terms = po_row.get("payment_terms") or "NET 30"
+        line_items = parse_items_cell(po_row.get("items_json")) or [
             {
-                "path": str(APP_ROOT),
-                "error_type": type(exc).__name__,
-                "message": str(exc),
+                "line_no": 1,
+                "description": "Demo service subscription",
+                "qty": 1,
+                "unit_price": subtotal,
+                "line_amount": subtotal,
+            }
+        ]
+    else:
+        po_number = "PO-DEMO-1001"
+        vendor_name = "Demo Supplier Pvt Ltd"
+        currency = "INR"
+        subtotal = 1000.0
+        tax_amount = 180.0
+        vat_percent = 18.0
+        document_total = 1180.0
+        payment_terms = "NET 30"
+        line_items = [
+            {
+                "line_no": 1,
+                "description": "Demo service subscription",
+                "qty": 1,
+                "unit_price": 1000.0,
+                "line_amount": 1000.0,
+            }
+        ]
+
+    invoice_date = datetime.now().date()
+    due_date = calculate_due_date(invoice_date, payment_terms)
+    return {
+        "document_type": "invoice",
+        "invoice_number": invoice_number,
+        "po_number": po_number,
+        "vendor_name": vendor_name,
+        "invoice_date": invoice_date.isoformat(),
+        "due_date": due_date.isoformat() if due_date is not None else None,
+        "currency": currency,
+        "document_subtotal": subtotal,
+        "tax_amount": tax_amount,
+        "vat_percent": vat_percent,
+        "document_total": document_total,
+        "amount": document_total,
+        "payment_terms": payment_terms,
+        "payment_status": "Pending",
+        "line_items": line_items,
+        "last_modified": datetime.now().isoformat(),
+    }
+
+
+
+# =========================================================
+# CP-19 DEMO WALKTHROUGH HELPERS
+# =========================================================
+
+def api_health(url):
+    try:
+        response = requests.get(f"{url.rstrip('/')}/health", timeout=3)
+        if response.status_code < 400:
+            return "Healthy"
+        return "Unavailable"
+    except Exception:
+        return "Unavailable"
+
+
+def post_agent_api(path, payload=None, params=None):
+    url = f"{AP_AGENT_BASE_URL}{path}"
+    try:
+        response = requests.post(url, json=payload or {}, params=params, timeout=60)
+        try:
+            data = response.json()
+        except ValueError:
+            data = {"raw_response": response.text}
+        return {
+            "ok": response.status_code < 400,
+            "status_code": response.status_code,
+            "url": url,
+            "data": data,
+            "error": None if response.status_code < 400 else data,
+        }
+    except requests.RequestException as exc:
+        return {
+            "ok": False,
+            "status_code": None,
+            "url": url,
+            "data": None,
+            "error": str(exc),
+        }
+
+
+def current_row_value(row, candidate_columns, default="—"):
+    for column in candidate_columns:
+        try:
+            value = row.get(column, None)
+        except AttributeError:
+            value = None
+        if value is not None and str(value) not in {"", "nan", "NaT", "None"}:
+            return value
+    return default
+
+
+def to_bool(value):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"true", "1", "yes", "y", "pass", "passed"}
+
+
+def one_based_dataframe(data):
+    try:
+        import pandas as pd
+        if isinstance(data, pd.DataFrame):
+            display_df = data.copy()
+        else:
+            display_df = pd.DataFrame(data)
+        display_df.index = range(1, len(display_df) + 1)
+        display_df.index.name = "R.no"
+        return display_df
+    except Exception:
+        return data
+
+
+def display_dataframe(df, columns=None, empty_message="No records found."):
+    if df is None or getattr(df, "empty", False):
+        st.info(empty_message)
+        return
+    display_df = df.copy()
+    if columns:
+        available = [column for column in columns if column in display_df.columns]
+        if available:
+            display_df = display_df[available]
+    st.dataframe(one_based_dataframe(display_df), use_container_width=True)
+
+
+def render_metric_row(items, columns=4):
+    if not items:
+        return
+    for start in range(0, len(items), columns):
+        row_items = items[start:start + columns]
+        cols = st.columns(len(row_items))
+        for col, item in zip(cols, row_items):
+            with col:
+                label = item[0]
+                value = item[1]
+                delta = item[2] if len(item) > 2 else None
+                st.metric(label, value, delta)
+
+
+def parse_json_like(value, default=None):
+    if default is None:
+        default = {}
+    if value is None:
+        return default
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return default
+        try:
+            return json.loads(value)
+        except Exception:
+            return default
+    return default
+
+
+def invoice_extraction_payload(invoice_row):
+    if not invoice_row:
+        return {}
+    payload = {}
+    for key in ["raw_json", "extracted_json", "parsed_json", "metadata_json"]:
+        parsed = parse_json_like(invoice_row.get(key), default={})
+        if isinstance(parsed, dict) and parsed:
+            payload = dict(parsed)
+            break
+    if not payload and isinstance(invoice_row, dict):
+        payload = dict(invoice_row)
+
+    for key in ("invoice_date", "due_date", "payment_terms"):
+        canonical_value = invoice_row.get(key)
+        if canonical_value not in (None, ""):
+            payload[key] = canonical_value
+
+    if payload.get("due_date") in (None, ""):
+        calculated = calculate_due_date(
+            payload.get("invoice_date"),
+            payload.get("payment_terms"),
+        )
+        if calculated is not None:
+            payload["due_date"] = calculated.isoformat()
+    return payload
+
+
+def populate_display_due_dates(dataframe):
+    """Fill display-only due dates without altering raw extraction evidence."""
+    if dataframe is None or getattr(dataframe, "empty", False):
+        return dataframe
+    required = {"invoice_date", "due_date", "payment_terms"}
+    if not required.issubset(dataframe.columns):
+        return dataframe
+
+    display_df = dataframe.copy()
+    for index, row in display_df.iterrows():
+        current_due_date = row.get("due_date")
+        if current_due_date not in (None, "") and str(current_due_date) not in {
+            "nan",
+            "NaT",
+        }:
+            continue
+        calculated = calculate_due_date(
+            row.get("invoice_date"),
+            row.get("payment_terms"),
+        )
+        if calculated is not None:
+            display_df.at[index, "due_date"] = calculated.isoformat()
+    return display_df
+
+
+def extract_warning_list(payload):
+    warnings = payload.get("warnings", []) if isinstance(payload, dict) else []
+    if isinstance(warnings, list):
+        return [str(item) for item in warnings if str(item).strip()]
+    if isinstance(warnings, str):
+        parsed = parse_json_like(warnings, default=None)
+        if isinstance(parsed, list):
+            return [str(item) for item in parsed if str(item).strip()]
+        return [warnings] if warnings.strip() else []
+    return []
+
+
+def _load_agent_optional_dataframe(statement, params):
+    try:
+        import pandas as pd
+        from sqlalchemy import text
+        from ap_database.engines import get_agent_session_factory
+
+        if not ap_agent_db_exists():
+            return pd.DataFrame()
+        session_factory = get_agent_session_factory()
+        with session_factory() as session:
+            return pd.read_sql_query(
+                text(statement),
+                session.connection(),
+                params=params,
+            )
+    except Exception:
+        import pandas as pd
+        return pd.DataFrame()
+
+
+def load_exception_cases_for_invoice(selected_invoice):
+    return _load_agent_optional_dataframe(
+        """
+        SELECT
+            ec.id AS exception_id,
+            ec.category,
+            ec.classifier_rationale AS description,
+            ec.status,
+            ec.owner_team AS owner,
+            ec.priority,
+            ec.resolution_strategy,
+            ec.created_at,
+            ec.updated_at
+        FROM exception_cases ec
+        JOIN invoices i ON i.id = ec.invoice_id
+        WHERE i.invoice_number = :invoice_number
+        ORDER BY ec.created_at DESC, ec.id DESC
+        """,
+        {"invoice_number": selected_invoice},
+    )
+
+
+def load_agent_invoice_identity(selected_invoice):
+    return _load_agent_optional_dataframe(
+        """
+        SELECT
+            i.id AS invoice_id,
+            i.invoice_number
+        FROM invoices i
+        WHERE i.invoice_number = :invoice_number
+        ORDER BY i.created_at DESC, i.id DESC
+        LIMIT 1
+        """,
+        {"invoice_number": selected_invoice},
+    )
+
+
+def load_posting_attempts_for_invoice(selected_invoice):
+    return _load_agent_optional_dataframe(
+        """
+        SELECT
+            pa.created_at,
+            pa.status,
+            pa.sap_document_number,
+            pa.message,
+            pa.attempt_number
+        FROM posting_attempts pa
+        JOIN invoices i ON i.id = pa.invoice_id
+        WHERE i.invoice_number = :invoice_number
+        ORDER BY pa.created_at DESC, pa.id DESC
+        """,
+        {"invoice_number": selected_invoice},
+    )
+
+
+def load_consumption_ledger_for_invoice(selected_invoice):
+    return _load_agent_optional_dataframe(
+        """
+        SELECT
+            cl.po_number,
+            cl.grn_number,
+            cl.invoice_number,
+            cl.po_item AS line_no,
+            cl.quantity AS consumed_qty,
+            cl.amount AS consumed_amount,
+            cl.ledger_status,
+            cl.created_at
+        FROM po_grn_consumption_ledger cl
+        WHERE cl.invoice_number = :invoice_number
+        ORDER BY cl.created_at DESC, cl.id DESC
+        """,
+        {"invoice_number": selected_invoice},
+    )
+
+
+def validation_summary(validation_df):
+    summary = {"total": 0, "passed": 0, "failed_blocking": 0, "warnings": 0}
+    if validation_df is None or getattr(validation_df, "empty", False):
+        return summary
+    summary["total"] = len(validation_df)
+    for _, row in validation_df.iterrows():
+        severity = str(row.get("severity", "")).upper()
+        passed = to_bool(row.get("passed"))
+        if severity in {"WARNING", "WARN"}:
+            summary["warnings"] += 1
+        elif passed:
+            summary["passed"] += 1
+        else:
+            summary["failed_blocking"] += 1
+    return summary
+
+
+def failed_blocking_controls(validation_df):
+    if validation_df is None or getattr(validation_df, "empty", False):
+        return validation_df
+    def is_blocking(row):
+        severity = str(row.get("severity", "")).upper()
+        if severity in {"WARNING", "WARN"}:
+            return False
+        return not to_bool(row.get("passed"))
+    return validation_df[validation_df.apply(is_blocking, axis=1)]
+
+
+def event_contains(events_df, tokens):
+    if events_df is None or getattr(events_df, "empty", False):
+        return False
+    token_list = [str(token).upper() for token in tokens]
+    for _, row in events_df.iterrows():
+        haystack = " ".join(
+            str(row.get(column, ""))
+            for column in ["event_type", "agent_name", "message", "metadata_json"]
+            if column in events_df.columns
+        ).upper()
+        if any(token in haystack for token in token_list):
+            return True
+    return False
+
+
+def render_extracted_invoice_tiles(parsed_json):
+    payload = parsed_json or {}
+    if not isinstance(payload, dict):
+        return
+    render_metric_row(
+        [
+            ("Invoice", payload.get("invoice_number", "—")),
+            ("Vendor", payload.get("vendor_name", "—")),
+            ("Vendor No.", payload.get("vendor_number", "—")),
+            ("PO", payload.get("po_number", "—")),
+            ("Invoice Date", payload.get("invoice_date", "—")),
+            ("Due Date", payload.get("due_date") or "—"),
+            ("Payment Terms", payload.get("payment_terms") or "—"),
+            ("Total", f"{payload.get('document_total', '—')} {payload.get('currency', '')}"),
+        ],
+        columns=4,
+    )
+    line_items = payload.get("line_items")
+    if isinstance(line_items, list) and line_items:
+        with st.expander("Show extracted line items", expanded=False):
+            st.dataframe(one_based_dataframe(line_items), use_container_width=True)
+
+
+def render_extraction_quality_tiles(invoice_row, validation_df=None, parsed_json=None):
+    payload = parsed_json if isinstance(parsed_json, dict) and parsed_json else invoice_extraction_payload(invoice_row)
+    canonical_confidence = canonicalize_extraction_confidence(payload)
+    warnings = canonical_confidence.warnings
+    review_required = payload.get("review_required") if isinstance(payload, dict) else None
+    quality_score = canonical_confidence.extraction_confidence
+    confidence_map = payload.get("field_confidence") if isinstance(payload, dict) else {}
+    if isinstance(confidence_map, str):
+        confidence_map = parse_json_like(confidence_map, default={})
+
+    ocr_rules = None
+    if validation_df is not None and not getattr(validation_df, "empty", False) and "rule_code" in validation_df.columns:
+        mask = validation_df["rule_code"].astype(str).str.upper().str.startswith("OCR-")
+        if "rule_name" in validation_df.columns:
+            mask = mask | validation_df["rule_name"].astype(str).str.upper().str.contains("OCR|EXTRACTION", regex=True)
+        ocr_rules = validation_df[mask]
+
+    warning_count = len(warnings)
+    failed_count = 0
+    if ocr_rules is not None and not ocr_rules.empty:
+        warning_count = 0
+        failed_count = 0
+        for _, result in ocr_rules.iterrows():
+            severity = str(result.get("severity", "")).upper()
+            passed = to_bool(result.get("passed"))
+            if severity in {"WARNING", "WARN"} and not passed:
+                warning_count += 1
+            elif not passed:
+                failed_count += 1
+
+    if review_required is None:
+        review_required = failed_count > 0 or warning_count > 0 and str(quality_score or "").strip() not in {"", "100"}
+
+    status = "Review Required" if to_bool(review_required) or failed_count else "Passed"
+    confidence = "High"
+    if isinstance(confidence_map, dict) and confidence_map:
+        low_fields = [k for k, v in confidence_map.items() if str(v).lower() == "low"]
+        confidence = "Low" if low_fields else "High"
+    elif quality_score not in [None, "", "—"]:
+        try:
+            confidence = "High" if float(quality_score) >= 0.9 else "Medium" if float(quality_score) >= 0.7 else "Low"
+        except Exception:
+            confidence = "Available"
+
+    render_metric_row(
+        [
+            ("Extraction Quality", status),
+            (
+                "Overall Confidence",
+                (
+                    f"{float(quality_score):.2%}"
+                    if quality_score not in [None, ""]
+                    else "Unknown"
+                ),
+            ),
+            ("Confidence Source", canonical_confidence.confidence_source),
+            ("Field Confidence", confidence),
+            ("OCR Warnings", warning_count),
+            ("OCR Blocking Failures", failed_count),
+            ("Review Required", "Yes" if to_bool(review_required) else "No"),
+            ("Attempt", canonical_confidence.attempt_number),
+            ("Retry Count", canonical_confidence.retry_count),
+        ],
+        columns=3,
+    )
+    if warnings:
+        with st.expander("Extraction warnings", expanded=False):
+            for warning in warnings:
+                st.warning(warning)
+    if ocr_rules is not None and not ocr_rules.empty:
+        display_dataframe(
+            ocr_rules,
+            ["rule_code", "rule_name", "passed", "severity", "message", "created_at"],
+            "No OCR/extraction quality controls found.",
+        )
+    else:
+        st.success("No separate OCR blocking controls were generated. Extraction quality is treated as passed for this invoice.")
+
+
+def render_validation_summary_and_groups(validation_df, extraction_context_available=False):
+    summary = validation_summary(validation_df)
+    render_metric_row(
+        [
+            ("Total Controls", summary["total"]),
+            ("Passed Controls", summary["passed"]),
+            ("Failed Blocking Controls", summary["failed_blocking"]),
+            ("Warning / Advisory Controls", summary["warnings"]),
+        ],
+        columns=4,
+    )
+    if validation_df is None or getattr(validation_df, "empty", False):
+        st.info("No validation results found.")
+        return
+    groups = [
+        ("PO", ["PO", "AP-001", "PO-"]),
+        ("GRN", ["GRN", "AP-006", "AP-007"]),
+        ("Vendor", ["VENDOR", "VND", "AP-002", "AP-003", "AP-004"]),
+        ("Duplicate", ["DUP", "AP-009"]),
+        ("Financial / Amount", ["FIN", "AMOUNT", "PRICE", "TOTAL", "AP-008"]),
+        ("Tax / VAT", ["TAX", "VAT", "GST"]),
+        ("Payment Terms", ["PAY", "PAYMENT", "TERMS", "AP-010"]),
+        ("Date", ["DATE"]),
+        ("PO/GRN Consumption", ["CONS", "CONSUMPTION", "LEDGER", "CUMULATIVE"]),
+        ("Extraction Quality", ["OCR", "EXTRACTION"]),
+        ("Other", []),
+    ]
+    tabs = st.tabs([name for name, _ in groups])
+    assigned = set()
+    for tab, (name, tokens) in zip(tabs, groups):
+        with tab:
+            if tokens:
+                indexes = []
+                upper_tokens = [token.upper() for token in tokens]
+                for idx, row in validation_df.iterrows():
+                    haystack = " ".join(
+                        str(row.get(column, ""))
+                        for column in ["rule_code", "rule_name", "message"]
+                        if column in validation_df.columns
+                    ).upper()
+                    if any(token in haystack for token in upper_tokens):
+                        indexes.append(idx)
+                        assigned.add(idx)
+                group_df = validation_df.loc[indexes]
+            else:
+                group_df = validation_df.drop(index=list(assigned), errors="ignore")
+            if name == "Extraction Quality" and (group_df is None or group_df.empty):
+                if extraction_context_available:
+                    st.success("No separate extraction-quality validation rows were generated. The extraction quality tiles above show the result for this clean invoice.")
+                else:
+                    st.info("No extraction quality controls found.")
+            else:
+                display_dataframe(
+                    group_df,
+                    ["rule_code", "rule_name", "passed", "severity", "message", "created_at"],
+                    f"No {name.lower()} controls found.",
+                )
+
+
+def render_exception_case_section(exception_df):
+    if exception_df is None or getattr(exception_df, "empty", False):
+        st.info("No exception case found for this invoice.")
+        return
+    open_count = 0
+    if "status" in exception_df.columns:
+        open_count = int(exception_df["status"].astype(str).str.upper().isin({"OPEN", "ACTIVE"}).sum())
+    latest = exception_df.iloc[0]
+    render_metric_row(
+        [
+            ("Exception Cases", len(exception_df)),
+            ("Open Exceptions", open_count),
+            ("Latest Category", current_row_value(latest, ["category"])),
+            ("Owner", current_row_value(latest, ["owner", "owner_team"])),
+            ("Priority", current_row_value(latest, ["priority"])),
+            ("Resolution Strategy", current_row_value(latest, ["resolution_strategy"])),
+        ],
+        columns=3,
+    )
+    display_dataframe(
+        exception_df,
+        ["exception_id", "category", "description", "status", "owner", "priority", "resolution_strategy", "created_at", "updated_at"],
+        "No exception cases found.",
+    )
+
+
+def render_communication_section(communication_df):
+    if communication_df is None or getattr(communication_df, "empty", False):
+        st.info("No email / communication records found. Clean posted invoices normally do not generate exception emails.")
+        return
+    latest = communication_df.iloc[0]
+    render_metric_row(
+        [
+            ("Messages", len(communication_df)),
+            ("Latest Status", current_row_value(latest, ["status"])),
+            ("Latest Recipient", current_row_value(latest, ["recipient"])),
+            ("Latest Direction", current_row_value(latest, ["direction"])),
+        ],
+        columns=4,
+    )
+    display_dataframe(
+        communication_df,
+        ["created_at", "direction", "recipient", "subject", "status", "smtp_message_id"],
+        "No email / communication records found.",
+    )
+    if "body" in communication_df.columns:
+        for _, communication in communication_df.iterrows():
+            with st.expander(f"Message body — {communication.get('subject', 'Message')}", expanded=False):
+                st.code(str(communication.get("body", "")), language="text")
+
+
+def render_events_section(events_df):
+    if events_df is None or getattr(events_df, "empty", False):
+        st.info("No workflow events found.")
+        return
+    latest = events_df.iloc[0]
+    render_metric_row(
+        [
+            ("Audit Events", len(events_df)),
+            ("Latest Event", current_row_value(latest, ["event_type"])),
+            ("Latest Agent", current_row_value(latest, ["agent_name"])),
+            ("Response Captured", "Yes" if event_contains(events_df, ["RESPONSE", "EVIDENCE", "FIELD_UPDATED"]) else "No"),
+            ("Recheck / Reprocess", "Yes" if event_contains(events_df, ["RECHECK", "REPROCESS"]) else "No"),
+        ],
+        columns=3,
+    )
+    display_dataframe(
+        events_df,
+        ["created_at", "event_type", "agent_name", "message"],
+        "No workflow events found.",
+    )
+
+
+def render_posting_and_ledger_section(posting_df, ledger_df, selected_row, posted_row=None):
+    render_metric_row(
+        [
+            ("Posting Status", current_row_value(selected_row, ["posting_status"])),
+            ("SAP Document", current_row_value(selected_row, ["sap_document_number"])),
+            ("Payment Status", current_row_value(selected_row, ["payment_status"])),
+            ("Due Date", current_row_value(selected_row, ["due_date"])),
+            ("Posted Reference", "Created" if posted_row else "Not Created"),
+            ("Posting Attempts", 0 if posting_df is None or getattr(posting_df, "empty", False) else len(posting_df)),
+            ("Consumption Ledger Rows", 0 if ledger_df is None or getattr(ledger_df, "empty", False) else len(ledger_df)),
+        ],
+        columns=3,
+    )
+    st.info("Posting and payment are separate. A posted invoice should not automatically be treated as paid.")
+    st.markdown("**Posting attempts**")
+    display_dataframe(
+        posting_df,
+        ["created_at", "status", "sap_document_number", "message", "attempt_number"],
+        "No posting attempts found.",
+    )
+    st.markdown("**PO/GRN consumption ledger**")
+    display_dataframe(
+        ledger_df,
+        ["po_number", "grn_number", "invoice_number", "line_no", "consumed_qty", "consumed_amount", "ledger_status", "created_at"],
+        "No PO/GRN consumption ledger rows found.",
+    )
+    if posted_row:
+        with st.expander("Show posted invoice reference", expanded=False):
+            st.json({key: str(value) for key, value in posted_row.items()})
+
+
+def active_exception_id(exception_df):
+    if exception_df is None or getattr(exception_df, "empty", False):
+        return None
+    if "status" in exception_df.columns:
+        open_cases = exception_df[exception_df["status"].astype(str).str.upper().isin({"OPEN", "ACTIVE"})]
+    else:
+        open_cases = exception_df.iloc[0:0]
+    active_case = open_cases.iloc[0] if not open_cases.empty else exception_df.iloc[0]
+    return current_row_value(active_case, ["exception_id"], default=None)
+
+
+def render_response_recheck_controls(invoice_number, selected_row, validation_df, exception_df, identity_df):
+    exception_id = active_exception_id(exception_df)
+    invoice_id = None
+    if identity_df is not None and not getattr(identity_df, "empty", False):
+        invoice_id = current_row_value(identity_df.iloc[0], ["invoice_id"], default=None)
+
+    if not exception_id:
+        st.info("No open exception is available for response intake. Clean invoices do not need this step.")
+        return
+
+    template_options = [
+        "Supplier confirms GRN completed",
+        "Supplier provides corrected PO number",
+        "Procurement confirms payment terms",
+        "Procurement confirms PO reopened",
+        "General clarification",
+        "Custom response",
+    ]
+    template = st.selectbox("Response Template", template_options, key=f"walkthrough_response_template_{invoice_number}")
+    current_po = current_row_value(selected_row, ["po_number"], default="")
+    if template == "Supplier confirms GRN completed":
+        default_response = f"GRN has now been completed for invoice {invoice_number}. Please recheck against PO {current_po}."
+    elif template == "Supplier provides corrected PO number":
+        default_response = f"The correct PO number for invoice {invoice_number} is {current_po}. Please update and run controlled recheck."
+    elif template == "Procurement confirms payment terms":
+        default_response = f"Procurement confirms the approved payment terms for PO {current_po} and invoice {invoice_number} are NET 30. Please update the PO master payment terms and rerun validation."
+    elif template == "Procurement confirms PO reopened":
+        default_response = f"Procurement confirms PO {current_po} has been reopened and is valid for invoice {invoice_number}."
+    elif template == "General clarification":
+        default_response = f"Clarification received for invoice {invoice_number}. Please attach this response and run controlled recheck."
+    else:
+        default_response = ""
+
+    response_text = st.text_area(
+        "Supplier / Procurement Response",
+        value=default_response,
+        height=130,
+        key=f"walkthrough_response_text_{invoice_number}",
+    )
+    col_a, col_b = st.columns(2)
+    with col_a:
+        corrected_po = st.text_input("Corrected PO Number (optional)", value="", key=f"walkthrough_corrected_po_{invoice_number}")
+        responder = st.text_input("Responder", value="Demo Procurement User", key=f"walkthrough_responder_{invoice_number}")
+    with col_b:
+        approved_terms = st.text_input("Approved Payment Terms (optional)", value="", key=f"walkthrough_approved_terms_{invoice_number}")
+        source = st.selectbox("Source", ["PROCUREMENT", "VENDOR", "AP", "MANUAL_TEST"], key=f"walkthrough_response_source_{invoice_number}")
+
+    col_submit, col_recheck, col_refresh = st.columns(3)
+    with col_submit:
+        if st.button("Submit Response", key=f"walkthrough_submit_response_{invoice_number}", use_container_width=True):
+            if not response_text.strip():
+                st.warning("Enter response text first.")
+            else:
+                values = {"invoice_number": invoice_number, "response_source": "Demo Walkthrough"}
+                if corrected_po.strip():
+                    values["po_number"] = corrected_po.strip()
+                if approved_terms.strip():
+                    values["payment_terms"] = approved_terms.strip()
+                payload = {
+                    "exception_id": exception_id,
+                    "source": source,
+                    "response_text": response_text.strip(),
+                    "provided_by": responder or "Demo UI",
+                    "values": values,
+                    "resume_recheck": False,
+                }
+                result = post_agent_api(
+                    EXCEPTION_RESPONSE_ENDPOINT_TEMPLATE.format(exception_id=exception_id),
+                    payload=payload,
+                )
+                st.session_state[f"last_response_text_{invoice_number}"] = response_text.strip()
+                st.session_state[f"last_response_result_{invoice_number}"] = result
+                if result.get("ok"):
+                    st.success("Response recorded successfully.")
+                else:
+                    st.error("Response intake failed.")
+                with st.expander("Response API result", expanded=False):
+                    st.json(result)
+    with col_recheck:
+        if st.button("Run Controlled Recheck", key=f"walkthrough_run_recheck_{invoice_number}", use_container_width=True):
+            if not invoice_id:
+                st.warning("Invoice ID was not found for this AP Agent invoice.")
+            else:
+                payload = {
+                    "latest_message": st.session_state.get(f"last_response_text_{invoice_number}", response_text),
+                    "simulate_resolution": False,
+                }
+                result = post_agent_api(
+                    CONTROLLED_RECHECK_ENDPOINT_TEMPLATE.format(invoice_id=invoice_id),
+                    payload=payload,
+                )
+                st.session_state[f"last_recheck_result_{invoice_number}"] = result
+                if result.get("ok"):
+                    st.success("Controlled recheck completed.")
+                else:
+                    st.error("Controlled recheck failed.")
+                with st.expander("Recheck API result", expanded=False):
+                    st.json(result)
+    with col_refresh:
+        if st.button("Refresh Journey", key=f"walkthrough_refresh_{invoice_number}", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
+
+    with st.expander("Last technical response/recheck result", expanded=False):
+        st.json(
+            {
+                "last_response_result": st.session_state.get(f"last_response_result_{invoice_number}"),
+                "last_recheck_result": st.session_state.get(f"last_recheck_result_{invoice_number}"),
             }
         )
 
-    for path in sorted(agent_db_candidates, key=lambda item: str(item)):
-        try:
-            if path.exists():
-                path.unlink()
-                result["agent_db_deleted_paths"].append(str(path))
-        except PermissionError as exc:
-            result["agent_db_delete_errors"].append(
-                {
-                    "path": str(path),
-                    "error_type": "PermissionError",
-                    "message": (
-                        "Stop the AP Agent API and run cleanup again."
-                    ),
-                    "raw_error": str(exc),
-                }
-            )
-        except Exception as exc:
-            result["agent_db_delete_errors"].append(
-                {
-                    "path": str(path),
-                    "error_type": type(exc).__name__,
-                    "message": str(exc),
-                }
-            )
+def render_single_invoice_walkthrough(invoice_number):
+    """Show the complete CP-19 lifecycle for one invoice on the Demo Walkthrough page."""
+    invoice_row = get_invoice_master_row(invoice_number)
 
-    input_dirs = {
-        resolve_path_from_env("UNSTRUCTURED_INPUT_DIR", DEFAULT_INPUT_DIR),
-        DEFAULT_INPUT_DIR,
-    }
-    deleted_count = 0
-    for input_dir in input_dirs:
-        try:
-            if not input_dir.exists():
-                continue
-            for path in input_dir.iterdir():
-                if path.is_file() and path.suffix.lower() in {
-                    ".pdf",
-                    ".png",
-                    ".jpg",
-                    ".jpeg",
-                    ".txt",
-                }:
-                    try:
-                        path.unlink()
-                        deleted_count += 1
-                    except PermissionError as exc:
-                        result["agent_db_delete_errors"].append(
-                            {
-                                "path": str(path),
-                                "error_type": "PermissionError",
-                                "message": str(exc),
-                            }
-                        )
-        except Exception as exc:
-            result["agent_db_delete_errors"].append(
-                {
-                    "path": str(input_dir),
-                    "error_type": type(exc).__name__,
-                    "message": str(exc),
-                }
-            )
+    if not invoice_row:
+        st.info("No saved invoice record found for this invoice yet.")
+        return
 
-    result["uploaded_files_deleted_count"] = deleted_count
-    result["status"] = "success"
-    result["message"] = (
-        "Invoice run data cleared. PO and GRN reference data were preserved."
+    extraction_payload = invoice_extraction_payload(invoice_row)
+
+    st.markdown("### 1. Invoice saved and extracted")
+    render_metric_row(
+        [
+            ("Invoice", invoice_row.get("invoice_number", "—")),
+            ("PO", invoice_row.get("po_number", "—")),
+            ("Vendor", invoice_row.get("vendor_name", "—")),
+            ("Vendor No.", invoice_row.get("vendor_number", extraction_payload.get("vendor_number", "—") if isinstance(extraction_payload, dict) else "—")),
+            ("Payment Terms", invoice_row.get("payment_terms", extraction_payload.get("payment_terms", "—") if isinstance(extraction_payload, dict) else "—")),
+            ("Due Date", extraction_payload.get("due_date") or invoice_row.get("due_date") or "—"),
+            ("Total", f"{invoice_row.get('document_total', '—')} {invoice_row.get('currency', '')}"),
+        ],
+        columns=3,
     )
-    return result
+    render_extracted_invoice_tiles(extraction_payload)
+    with st.expander("Show saved invoice record", expanded=False):
+        st.json({key: str(value) for key, value in invoice_row.items()})
+
+    st.markdown("### 2. Extraction quality")
+    validation_df = load_ap_agent_validation_results(invoice_number) if ap_agent_db_exists() else None
+    render_extraction_quality_tiles(invoice_row, validation_df=validation_df, parsed_json=extraction_payload)
+
+    st.markdown("### 3. AP Agent review status")
+    if not ap_agent_db_exists():
+        st.warning("AP Agent database is not available yet. Start the AP Agent API and process the invoice.")
+        return
+
+    agent_df = load_ap_agent_invoices(limit=500)
+    if agent_df.empty or "invoice_number" not in agent_df.columns:
+        st.info("Invoice is saved, but AP Agent has not imported it yet.")
+        return
+
+    selected_agent_rows = agent_df[agent_df["invoice_number"].astype(str) == str(invoice_number)]
+    if selected_agent_rows.empty:
+        st.info(
+            "Invoice is saved, but AP Agent has not imported it yet. "
+            "Make sure AP Agent API is running and trigger invoice processing."
+        )
+        return
+
+    selected_agent_row_series = selected_agent_rows.iloc[0]
+    selected_agent_row = selected_agent_row_series.to_dict()
+    workflow_status = current_row_value(selected_agent_row_series, ["status", "agent_status", "workflow_status"])
+    validation_df = load_ap_agent_validation_results(invoice_number)
+    communication_df = load_ap_agent_communications(invoice_number)
+    events_df = load_ap_agent_events(invoice_number)
+    exception_df = load_exception_cases_for_invoice(invoice_number)
+    identity_df = load_agent_invoice_identity(invoice_number)
+    posting_df = load_posting_attempts_for_invoice(invoice_number)
+    ledger_df = load_consumption_ledger_for_invoice(invoice_number)
+    posted_row = get_posted_invoice_master_row(invoice_number)
+    failed_df = failed_blocking_controls(validation_df)
+    failed_count = 0 if failed_df is None or getattr(failed_df, "empty", False) else len(failed_df)
+
+    render_metric_row(
+        [
+            ("Workflow Status", workflow_status),
+            ("Failed Rules", failed_count),
+            ("Posting Status", current_row_value(selected_agent_row_series, ["posting_status"])),
+            ("SAP Document", current_row_value(selected_agent_row_series, ["sap_document_number"])),
+            ("Payment Status", current_row_value(selected_agent_row_series, ["payment_status"])),
+            ("Exception Category", current_row_value(selected_agent_row_series, ["exception_category"])),
+        ],
+        columns=3,
+    )
+    st.markdown("#### Canonical extraction and resolution")
+    render_metric_row(
+        [
+            ("Invoice Supplier", selected_agent_row.get("vendor_name", "—")),
+            (
+                "Extracted Vendor No.",
+                selected_agent_row.get("extracted_vendor_number") or "—",
+            ),
+            (
+                "Resolved Vendor No.",
+                selected_agent_row.get("resolved_vendor_number") or "—",
+            ),
+            (
+                "Vendor Match",
+                " / ".join(
+                    str(value)
+                    for value in (
+                        selected_agent_row.get("vendor_match_status"),
+                        selected_agent_row.get("vendor_match_method"),
+                    )
+                    if value not in (None, "")
+                ) or "—",
+            ),
+            (
+                "Invoice Date (raw → normalized)",
+                f"{selected_agent_row.get('raw_invoice_date') or '—'} → "
+                f"{selected_agent_row.get('invoice_date') or '—'}",
+            ),
+            (
+                "Due Date (raw → normalized)",
+                f"{selected_agent_row.get('raw_due_date') or '—'} → "
+                f"{selected_agent_row.get('due_date') or '—'}",
+            ),
+            (
+                "Currency (extracted → resolved)",
+                f"{selected_agent_row.get('extracted_currency') or '—'} → "
+                f"{selected_agent_row.get('resolved_currency') or '—'}",
+            ),
+            (
+                "Currency Method",
+                selected_agent_row.get("currency_resolution_method") or "—",
+            ),
+            (
+                "Extraction Confidence",
+                selected_agent_row.get("extraction_confidence") or "—",
+            ),
+            (
+                "Confidence Source",
+                selected_agent_row.get("extraction_confidence_source") or "—",
+            ),
+            (
+                "Extraction Provider / Model",
+                " / ".join(
+                    str(value)
+                    for value in (
+                        selected_agent_row.get("extraction_provider"),
+                        selected_agent_row.get("extraction_model"),
+                    )
+                    if value not in (None, "")
+                ) or "—",
+            ),
+            (
+                "Extraction Attempt",
+                selected_agent_row.get("extraction_attempt_number") or "—",
+            ),
+            (
+                "Retry Count",
+                selected_agent_row.get("extraction_retry_count") or 0,
+            ),
+            (
+                "Extraction Review",
+                selected_agent_row.get("extraction_review_status") or "—",
+            ),
+        ],
+        columns=4,
+    )
+    if selected_agent_row.get("date_parse_warning"):
+        st.warning(str(selected_agent_row["date_parse_warning"]))
+
+    st.markdown("### 4. Journey status")
+    response_captured = event_contains(events_df, ["RESPONSE", "EVIDENCE", "FIELD_UPDATED"])
+    recheck_happened = event_contains(events_df, ["RECHECK", "REPROCESS"])
+    render_metric_row(
+        [
+            ("Invoice Received", "Done"),
+            ("OCR + LLM Extraction", "Done"),
+            ("Extraction Quality", "Review" if str(workflow_status) in {"EXTRACTION_REVIEW_REQUIRED", "EXTRACTION_FAILED"} else "Passed"),
+            ("AP Controls", "Failed" if failed_count else "Passed"),
+            ("Exception", "Created" if not exception_df.empty else "Not Required"),
+            ("Communication", "Created" if not communication_df.empty else "Not Created"),
+            ("Response", "Captured" if response_captured else "Not Captured"),
+            ("Controlled Recheck", "Done" if recheck_happened else "Not Done"),
+            ("Posting", "Posted" if str(workflow_status) == "POSTED" or posted_row else "Not Posted"),
+        ],
+        columns=3,
+    )
+
+    st.markdown("### 5. Validation controls")
+    render_validation_summary_and_groups(
+        validation_df,
+        extraction_context_available=bool(extraction_payload),
+    )
+
+    st.markdown("### 6. Exception and response / recheck")
+    tab_exception, tab_response, tab_after = st.tabs(
+        ["Exception Case", "Capture Response & Recheck", "After Recheck Evidence"]
+    )
+    with tab_exception:
+        render_exception_case_section(exception_df)
+        st.markdown("**Failed blocking controls**")
+        display_dataframe(
+            failed_df,
+            ["rule_code", "rule_name", "passed", "severity", "message", "created_at"],
+            "No failed blocking controls found for this invoice.",
+        )
+    with tab_response:
+        render_response_recheck_controls(
+            invoice_number,
+            selected_agent_row_series,
+            validation_df,
+            exception_df,
+            identity_df,
+        )
+    with tab_after:
+        refreshed_agent_df = load_ap_agent_invoices(limit=500)
+        refreshed_row = selected_agent_row_series
+        if refreshed_agent_df is not None and not refreshed_agent_df.empty and "invoice_number" in refreshed_agent_df.columns:
+            refreshed_match = refreshed_agent_df[refreshed_agent_df["invoice_number"].astype(str) == str(invoice_number)]
+            if not refreshed_match.empty:
+                refreshed_row = refreshed_match.iloc[0]
+        refreshed_validations = load_ap_agent_validation_results(invoice_number)
+        refreshed_events = load_ap_agent_events(invoice_number)
+        refreshed_communications = load_ap_agent_communications(invoice_number)
+        refreshed_failed = failed_blocking_controls(refreshed_validations)
+        refreshed_failed_count = 0 if refreshed_failed is None or getattr(refreshed_failed, "empty", False) else len(refreshed_failed)
+        render_metric_row(
+            [
+                ("Workflow", f"{workflow_status} → {current_row_value(refreshed_row, ['status', 'agent_status', 'workflow_status'])}"),
+                ("Posting", f"{current_row_value(selected_agent_row_series, ['posting_status'])} → {current_row_value(refreshed_row, ['posting_status'])}"),
+                ("Payment", f"{current_row_value(selected_agent_row_series, ['payment_status'])} → {current_row_value(refreshed_row, ['payment_status'])}"),
+                ("Due Date", current_row_value(refreshed_row, ["due_date"])),
+                ("Failed Controls", f"{failed_count} → {refreshed_failed_count}"),
+                ("Communications", f"{0 if communication_df.empty else len(communication_df)} → {0 if refreshed_communications.empty else len(refreshed_communications)}"),
+                ("Audit Events", f"{0 if events_df.empty else len(events_df)} → {0 if refreshed_events.empty else len(refreshed_events)}"),
+                ("Response Captured", "Yes" if event_contains(refreshed_events, ["RESPONSE", "EVIDENCE", "FIELD_UPDATED"]) else "No"),
+                ("Recheck Happened", "Yes" if event_contains(refreshed_events, ["RECHECK", "REPROCESS"]) else "No"),
+            ],
+            columns=4,
+        )
+        display_dataframe(
+            refreshed_events.head(15) if refreshed_events is not None and not refreshed_events.empty else refreshed_events,
+            ["created_at", "event_type", "agent_name", "message"],
+            "No workflow events found after recheck.",
+        )
+
+    st.markdown("### 7. Communication / email")
+    render_communication_section(communication_df)
+
+    st.markdown("### 8. Posting, payment, and PO/GRN consumption")
+    render_posting_and_ledger_section(posting_df, ledger_df, selected_agent_row_series, posted_row=posted_row)
+
+    st.markdown("### 9. Workflow audit trail")
+    render_events_section(events_df)
+
+    st.markdown("### 10. Technical details for deep-dive")
+    st.caption("Use AP Agent Monitor for broader history. This expander keeps the walkthrough page client-friendly by default.")
+    with st.expander("AP Agent invoice row", expanded=False):
+        st.dataframe(selected_agent_rows, use_container_width=True)
+    with st.expander("Validation raw data", expanded=False):
+        st.json(validation_df.to_dict(orient="records") if validation_df is not None else [])
+    with st.expander("Exception raw data", expanded=False):
+        st.json(exception_df.to_dict(orient="records") if exception_df is not None else [])
+    with st.expander("Communication raw data", expanded=False):
+        st.json(communication_df.to_dict(orient="records") if communication_df is not None else [])
+    with st.expander("Workflow event raw data", expanded=False):
+        st.json(events_df.to_dict(orient="records") if events_df is not None else [])
+    with st.expander("Posting and ledger raw data", expanded=False):
+        st.json(
+            {
+                "posting_attempts": posting_df.to_dict(orient="records") if posting_df is not None else [],
+                "consumption_ledger": ledger_df.to_dict(orient="records") if ledger_df is not None else [],
+            }
+        )
 
 
 def init_line_items(state_key, default_item):
@@ -405,969 +2037,449 @@ def render_line_items_editor(
 # PAGE CONFIG
 # -----------------------------------
 
-# -----------------------------------
-# DEMO SHELL HELPERS
-# -----------------------------------
+st.set_page_config(
+    page_title="AP Agent Demo",
+    page_icon="🧾",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-AGENT_API_PORT = int(os.getenv("AGENT_API_PORT", "8000"))
-AP_AGENT_BASE_URL = os.getenv(
-    "AGENT_API_BASE_URL",
-    os.getenv("AP_AGENT_BASE_URL", f"http://127.0.0.1:{AGENT_API_PORT}"),
-).rstrip("/")
-EXCEPTION_RESPONSE_ENDPOINT_TEMPLATE = "/api/v1/exceptions/{exception_id}/responses"
-CONTROLLED_RECHECK_ENDPOINT_TEMPLATE = "/api/v1/invoices/{invoice_id}/recheck"
-
-
-def render_section_help(text):
-    st.info(text)
-
-
-def render_status_badge(status):
-    normalized = str(status or "UNKNOWN")
-    palette = {
-        "ok": ("#027a48", "#ecfdf3"),
-        "healthy": ("#027a48", "#ecfdf3"),
-        "available": ("#027a48", "#ecfdf3"),
-        "unavailable": ("#b42318", "#fef3f2"),
-        "error": ("#b42318", "#fef3f2"),
-        "unknown": ("#344054", "#f2f4f7"),
-    }
-    color, background = palette.get(normalized.lower(), ("#344054", "#f2f4f7"))
-    st.markdown(
-        f"<span class='status-badge' style='color:{color};background:{background};'>"
-        f"{normalized}</span>",
-        unsafe_allow_html=True,
-    )
-
-
-def render_info_card(title, value, help_text=None):
-    st.markdown(
-        f"""
-        <div class="info-card">
-            <div class="info-card-label">{title}</div>
-            <div class="info-card-value">{value}</div>
-            <div class="info-card-help">{help_text or ""}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def safe_dataframe(df, empty_message):
-    if df is None or getattr(df, "empty", False):
-        st.info(empty_message)
-    else:
-        render_one_based_dataframe(df)
-
-
-def one_based_dataframe(data):
-    try:
-        import pandas as pd
-
-        if isinstance(data, pd.DataFrame):
-            display_df = data.copy()
-        else:
-            display_df = pd.DataFrame(data)
-        display_df.index = range(1, len(display_df) + 1)
-        display_df.index.name = "#"
-        return display_df
-    except Exception:
-        return data
-
-
-def render_one_based_dataframe(data, **kwargs):
-    options = {"use_container_width": True}
-    options.update(kwargs)
-    st.dataframe(one_based_dataframe(data), **options)
-
-
-def safe_table_count(table_name):
-    try:
-        return get_table_count(table_name)
-    except Exception:
-        return 0
-
-
-def safe_load_table(table_name, limit=30):
-    try:
-        effective_limit = safe_table_count(table_name) if limit is None else limit
-        return load_table_data(table_name, limit=effective_limit)
-    except Exception as exc:
-        st.error(f"{table_name} table error: {exc}")
-        return None
-
-
-def render_full_master_table(table_name, empty_message):
-    row_count = safe_table_count(table_name)
-    st.caption(f"Showing all {row_count} row{'s' if row_count != 1 else ''}.")
-    safe_dataframe(
-        safe_load_table(table_name, limit=None),
-        empty_message,
-    )
-
-
-def normalize_status_label(status):
-    return str(status or "UNKNOWN").replace("_", " ").title()
-
-
-def get_status_counts(summary_df=None):
-    if summary_df is None:
-        if not ap_agent_db_exists():
-            return {}
-        summary_df = load_ap_agent_summary()
-    if summary_df is None or getattr(summary_df, "empty", False):
-        return {}
-    if "status" not in summary_df.columns or "total" not in summary_df.columns:
-        return {}
-    return {
-        str(row["status"]): int(row["total"])
-        for _, row in summary_df.iterrows()
-    }
-
-
-def render_metric_cards(cards, columns=4):
-    rows = [cards[index:index + columns] for index in range(0, len(cards), columns)]
-    for row in rows:
-        cols = st.columns(len(row))
-        for col, card in zip(cols, row):
-            with col:
-                render_info_card(
-                    card.get("title"),
-                    card.get("value"),
-                    card.get("help_text"),
-                )
-
-
-def business_dataframe(df, columns, empty_message):
-    if df is None or getattr(df, "empty", False):
-        st.info(empty_message)
-        return
-    available_columns = [column for column in columns if column in df.columns]
-    if not available_columns:
-        st.info(empty_message)
-        return
-    render_one_based_dataframe(df[available_columns])
-
-
-def current_row_value(row, candidate_columns, default="—"):
-    for column in candidate_columns:
-        try:
-            value = row.get(column, None)
-        except AttributeError:
-            value = None
-        if value is not None and str(value) not in {"", "nan", "NaT", "None"}:
-            return value
-    return default
-
-
-def validation_contains(validation_df, tokens):
-    if validation_df is None or getattr(validation_df, "empty", False):
-        return False
-    token_list = [token.upper() for token in tokens]
-    for _, row in validation_df.iterrows():
-        haystack = " ".join(
-            str(row.get(column, ""))
-            for column in ["rule_code", "rule_name", "message"]
-            if column in validation_df.columns
-        ).upper()
-        if any(token in haystack for token in token_list):
-            return True
-    return False
-
-
-def validation_group_outcome(validation_df, tokens):
-    if validation_df is None or getattr(validation_df, "empty", False):
-        return "Not started"
-    token_list = [token.upper() for token in tokens]
-    matched = []
-    for _, row in validation_df.iterrows():
-        haystack = " ".join(
-            str(row.get(column, ""))
-            for column in ["rule_code", "rule_name", "message"]
-            if column in validation_df.columns
-        ).upper()
-        if any(token in haystack for token in token_list):
-            matched.append(row)
-    if not matched:
-        return "Not started"
-    for row in matched:
-        severity = str(row.get("severity", "")).upper()
-        passed = row.get("passed")
-        if severity == "ERROR" and str(passed).lower() in {"false", "0", "no"}:
-            return "Failed"
-    for row in matched:
-        severity = str(row.get("severity", "")).upper()
-        passed = row.get("passed")
-        if severity in {"WARNING", "WARN"} or str(passed).lower() in {"false", "0", "no"}:
-            return "Warning / Action Required"
-    return "Passed"
-
-
-def event_contains(events_df, tokens):
-    if events_df is None or getattr(events_df, "empty", False):
-        return False
-    token_list = [token.upper() for token in tokens]
-    for _, row in events_df.iterrows():
-        haystack = " ".join(
-            str(row.get(column, ""))
-            for column in ["event_type", "agent_name", "message"]
-            if column in events_df.columns
-        ).upper()
-        if any(token in haystack for token in token_list):
-            return True
-    return False
-
-
-def response_recheck_payment_terms_summary(events_df):
-    summary = {
-        "payment_terms": "—",
-        "master_updated": "No",
-        "master_target": "—",
-    }
-    if events_df is None or getattr(events_df, "empty", False):
-        return summary
-    for _, row in events_df.iterrows():
-        event_type = str(row.get("event_type", ""))
-        metadata = row.get("metadata_json", row.get("metadata", {}))
-        if isinstance(metadata, str):
-            try:
-                metadata = json.loads(metadata)
-            except Exception:
-                metadata = {}
-        if not isinstance(metadata, dict):
-            metadata = {}
-        if event_type == "EXCEPTION_EVIDENCE_EXTRACTED":
-            evidence = metadata.get("evidence") or {}
-            terms = (
-                evidence.get("PAYMENT_TERMS_PROVIDED", {})
-                .get("payment_terms")
-                if isinstance(evidence, dict)
-                else None
-            )
-            if terms and summary["payment_terms"] == "—":
-                summary["payment_terms"] = terms
-        if event_type in {
-            "PAYMENT_TERMS_MASTER_UPDATED_FROM_RESPONSE",
-            "PAYMENT_TERMS_MASTER_UPDATED_FROM_RECHECK",
-        }:
-            summary["master_updated"] = "Yes"
-            summary["master_target"] = metadata.get(
-                "table_name",
-                metadata.get("target", "master data"),
-            )
-            if metadata.get("new_value"):
-                summary["payment_terms"] = metadata["new_value"]
-    return summary
-
-
-def is_blocking_failed_control(row):
-    severity = str(row.get("severity", "")).upper()
-    passed = str(row.get("passed", "")).lower()
-    is_failed = passed in {"false", "0", "no"}
-    if severity in {"WARNING", "WARN"}:
-        return False
-    if severity in {"ERROR", "BLOCKING", "HIGH"} and is_failed:
-        return True
-    return not severity and is_failed
-
-
-def failed_blocking_controls(validation_df):
-    if validation_df is None or getattr(validation_df, "empty", False):
-        return validation_df
-    return validation_df[validation_df.apply(is_blocking_failed_control, axis=1)]
-
-
-def build_mock_response_template(template_name, selected_invoice_row, validation_df):
-    invoice_number = current_row_value(selected_invoice_row, ["invoice_number"], "the invoice")
-    vendor_name = current_row_value(selected_invoice_row, ["vendor_name"], "the supplier")
-    po_number = current_row_value(selected_invoice_row, ["po_number"], "PO-1001")
-    if po_number == "—":
-        po_number = "PO-1001"
-    templates = {
-        "Supplier confirms GRN completed": (
-            f"GRN has now been completed for invoice {invoice_number}. "
-            f"Please recheck the receipt evidence against {po_number}."
-        ),
-        "Supplier provides corrected PO number": (
-            f"The correct purchase order for invoice {invoice_number} is {po_number}. "
-            f"Please update the invoice context and run the controlled recheck."
-        ),
-        "Procurement confirms PO reopened": (
-            f"Procurement confirms {po_number} has been reopened and is valid for "
-            f"invoice {invoice_number} from {vendor_name}."
-        ),
-        "Supplier confirms corrected tax/VAT amount": (
-            f"The corrected tax amount for invoice {invoice_number} has been confirmed. "
-            "Please use the attached evidence and recheck the tax control."
-        ),
-        "Supplier confirms payment terms": (
-            f"Procurement confirms the approved payment terms for PO "
-            f"{po_number} and invoice {invoice_number} are NET 30. "
-            "Please update the PO master payment terms to NET 30 and "
-            "rerun AP validation."
-        ),
-        "General clarification": (
-            f"Clarification received for invoice {invoice_number}. "
-            "Please attach this response to the exception and run controlled recheck."
-        ),
-        "Custom response": "",
-    }
-    return templates.get(template_name, "")
-
-
-def render_stage_cards(stages):
-    status_help = {
-        "Passed": "Complete",
-        "Warning / Action Required": "Needs action",
-        "Failed": "Failed",
-        "Skipped": "Not required",
-        "Not started": "Waiting",
-    }
-    cards = [
-        {
-            "title": stage,
-            "value": status,
-            "help_text": status_help.get(status, ""),
-        }
-        for stage, status in stages
-    ]
-    render_metric_cards(cards, columns=3)
-
-
-def extracted_value(payload, candidate_keys, default="—"):
-    payload = payload or {}
-    for key in candidate_keys:
-        value = payload.get(key)
-        if value is not None and str(value) != "":
-            return value
-    return default
-
-
-def normalize_parsed_invoice_payload(parsed_json):
-    parsed_json = parsed_json or {}
-    if isinstance(parsed_json, dict):
-        for key in ["invoice", "invoice_data", "parsed_invoice", "data"]:
-            nested = parsed_json.get(key)
-            if isinstance(nested, dict):
-                return nested
-    return parsed_json if isinstance(parsed_json, dict) else {}
-
-
-def render_extracted_business_fields(parsed_json):
-    payload = normalize_parsed_invoice_payload(parsed_json)
-    fields = [
-        ("Invoice number", ["invoice_number", "invoice_no", "number"]),
-        ("Vendor", ["vendor_name", "supplier_name", "vendor"]),
-        ("Vendor number", ["vendor_number", "supplier_number"]),
-        ("PO number", ["po_number", "purchase_order", "po_no"]),
-        ("Invoice date", ["invoice_date", "date"]),
-        ("Due date", ["due_date", "payment_due_date"]),
-        ("Currency", ["currency"]),
-        ("Subtotal", ["document_subtotal", "subtotal"]),
-        ("Tax amount", ["tax_amount", "tax"]),
-        ("VAT %", ["vat_percent", "tax_rate", "vat_rate"]),
-        ("Total", ["document_total", "total_amount", "amount"]),
-        ("Payment terms", ["payment_terms", "terms"]),
-    ]
-    cards = [
-        {
-            "title": label,
-            "value": extracted_value(payload, keys),
-            "help_text": "",
-        }
-        for label, keys in fields
-    ]
-    render_metric_cards(cards, columns=4)
-    line_items = extracted_value(
-        payload,
-        ["line_items", "items", "lines"],
-        default=[],
-    )
-    if isinstance(line_items, list) and line_items:
-        st.subheader("Line Items")
-        render_one_based_dataframe(line_items)
-
-
-def render_invoice_journey_tracker(selected_invoice, validation_df, communication_df, events_df):
-    workflow_status = str(
-        current_row_value(selected_invoice, ["status", "workflow_status", "agent_status"], "")
-    )
-    posting_status = str(current_row_value(selected_invoice, ["posting_status"], ""))
-    payment_status = str(current_row_value(selected_invoice, ["payment_status"], "UNKNOWN"))
-    has_exception = workflow_status == "EXCEPTION_IDENTIFIED"
-    stages = [
-        ("Invoice received", "Passed"),
-        ("OCR / AI extraction completed", "Passed"),
-        (
-            "Extraction quality checked",
-            "Warning / Action Required"
-            if workflow_status == "EXTRACTION_REVIEW_REQUIRED"
-            else "Failed"
-            if workflow_status == "EXTRACTION_FAILED"
-            else "Passed",
-        ),
-        ("PO checked", validation_group_outcome(validation_df, ["PO"])),
-        ("GRN checked", validation_group_outcome(validation_df, ["GRN"])),
-        ("Vendor checked", validation_group_outcome(validation_df, ["VENDOR"])),
-        ("Duplicate checked", validation_group_outcome(validation_df, ["DUP"])),
-        ("Financial totals checked", validation_group_outcome(validation_df, ["FIN", "AMOUNT", "PRICE", "TOTAL"])),
-        ("Tax checked", validation_group_outcome(validation_df, ["TAX", "VAT", "GST"])),
-        ("Payment terms checked", validation_group_outcome(validation_df, ["PAYMENT", "TERMS"])),
-        ("Date sequence checked", validation_group_outcome(validation_df, ["DATE"])),
-        ("PO / GRN consumption checked", validation_group_outcome(validation_df, ["CONSUMPTION", "LEDGER", "CUMULATIVE"])),
-        (
-            "Exception created or invoice ready",
-            "Warning / Action Required"
-            if workflow_status == "EXCEPTION_IDENTIFIED"
-            else "Passed"
-            if workflow_status in {"READY_FOR_POSTING", "POSTED"} or posting_status == "POSTED"
-            else "Not started",
-        ),
-        (
-            "Communication drafted if required",
-            "Passed"
-            if communication_df is not None and not communication_df.empty
-            else "Not started"
-            if has_exception
-            else "Skipped",
-        ),
-        (
-            "Response received if required",
-            "Passed"
-            if event_contains(events_df, ["RESPONSE", "EVIDENCE", "FIELD_UPDATED"])
-            else "Skipped"
-            if not has_exception
-            else "Not started",
-        ),
-        (
-            "Controlled recheck completed if required",
-            "Passed"
-            if event_contains(events_df, ["RECHECK"])
-            else "Skipped"
-            if not has_exception
-            else "Not started",
-        ),
-        (
-            "Posted if eligible",
-            "Passed"
-            if workflow_status == "POSTED" or posting_status == "POSTED"
-            else "Not started",
-        ),
-        ("Payment status tracked separately", str(payment_status)),
-        (
-            "Audit trail recorded",
-            "Passed"
-            if events_df is not None and not events_df.empty
-            else "Not started",
-        ),
-    ]
-    render_stage_cards(stages)
-
-
-def _load_agent_optional_dataframe(statement, params):
-    try:
-        import pandas as pd
-        from sqlalchemy import text
-        from ap_database.engines import get_agent_session_factory
-
-        if not ap_agent_db_exists():
-            return pd.DataFrame()
-        session_factory = get_agent_session_factory()
-        with session_factory() as session:
-            return pd.read_sql_query(
-                text(statement),
-                session.connection(),
-                params=params,
-            )
-    except Exception:
-        import pandas as pd
-
-        return pd.DataFrame()
-
-
-def load_exception_cases_for_invoice(selected_invoice):
-    return _load_agent_optional_dataframe(
-        """
-        SELECT
-            ec.id AS exception_id,
-            ec.category,
-            ec.classifier_rationale AS description,
-            ec.status,
-            ec.owner_team AS owner,
-            ec.priority,
-            ec.resolution_strategy,
-            ec.created_at,
-            ec.updated_at
-        FROM exception_cases ec
-        JOIN invoices i ON i.id = ec.invoice_id
-        WHERE i.invoice_number = :invoice_number
-        ORDER BY ec.created_at DESC, ec.id DESC
-        """,
-        {"invoice_number": selected_invoice},
-    )
-
-
-def load_agent_invoice_identity(selected_invoice):
-    return _load_agent_optional_dataframe(
-        """
-        SELECT
-            i.id AS invoice_id,
-            i.invoice_number
-        FROM invoices i
-        WHERE i.invoice_number = :invoice_number
-        ORDER BY i.created_at DESC, i.id DESC
-        LIMIT 1
-        """,
-        {"invoice_number": selected_invoice},
-    )
-
-
-def load_posting_attempts_for_invoice(selected_invoice):
-    return _load_agent_optional_dataframe(
-        """
-        SELECT
-            pa.created_at,
-            pa.status,
-            pa.sap_document_number,
-            pa.message
-        FROM posting_attempts pa
-        JOIN invoices i ON i.id = pa.invoice_id
-        WHERE i.invoice_number = :invoice_number
-        ORDER BY pa.created_at DESC, pa.id DESC
-        """,
-        {"invoice_number": selected_invoice},
-    )
-
-
-def load_consumption_ledger_for_invoice(selected_invoice):
-    return _load_agent_optional_dataframe(
-        """
-        SELECT
-            cl.po_number,
-            cl.grn_number,
-            cl.invoice_number,
-            cl.po_item AS line_no,
-            cl.quantity AS consumed_qty,
-            cl.amount AS consumed_amount,
-            cl.ledger_status,
-            cl.created_at
-        FROM po_grn_consumption_ledger cl
-        WHERE cl.invoice_number = :invoice_number
-        ORDER BY cl.created_at DESC, cl.id DESC
-        """,
-        {"invoice_number": selected_invoice},
-    )
-
-
-def render_status_explanation(workflow_status, posting_status, payment_status):
-    status = str(workflow_status or "UNKNOWN")
-    explanations = {
-        "POSTED": "Invoice was posted successfully. Payment remains separate.",
-        "READY_FOR_POSTING": "Invoice passed blocking AP controls and is ready to post.",
-        "EXCEPTION_IDENTIFIED": "Invoice has a blocking exception. Review failed controls and communication.",
-        "EXTRACTION_REVIEW_REQUIRED": "Invoice extraction requires review before validation can proceed.",
-        "EXTRACTION_FAILED": "Invoice could not be extracted reliably.",
-        "POSTING_FAILED": "Invoice passed validation but failed posting.",
-        "VALIDATION_IN_PROGRESS": "Invoice is currently moving through validation.",
-        "REPROCESS_REQUESTED": "Invoice is queued for controlled recheck.",
-        "REPROCESS_FAILED": "Controlled recheck ran but the invoice is still blocked.",
-    }
-    next_actions = {
-        "POSTED": "Review posting details and remember payment is tracked separately.",
-        "READY_FOR_POSTING": "Proceed with posting when the demo flow requires it.",
-        "EXCEPTION_IDENTIFIED": "Review failed validation controls and communication.",
-        "EXTRACTION_REVIEW_REQUIRED": "Review extracted fields before continuing.",
-        "EXTRACTION_FAILED": "Upload a clearer invoice or correct the extraction source.",
-        "POSTING_FAILED": "Review the posting attempt message.",
-        "VALIDATION_IN_PROGRESS": "Refresh after validation completes.",
-        "REPROCESS_REQUESTED": "Run or wait for controlled recheck.",
-        "REPROCESS_FAILED": "Review remaining failed controls.",
-    }
-    render_metric_cards(
-        [
-            {
-                "title": "Workflow status",
-                "value": workflow_status,
-                "help_text": explanations.get(status, "Review workflow events for latest status."),
-            },
-            {
-                "title": "Posting status",
-                "value": posting_status,
-                "help_text": "Posting and payment are separate.",
-            },
-            {
-                "title": "Payment status",
-                "value": payment_status,
-                "help_text": "Payment should come from ERP/payment-run data.",
-            },
-            {
-                "title": "Recommended next action",
-                "value": next_actions.get(status, "Review workflow events for latest status."),
-                "help_text": "Operational guidance",
-            },
-        ],
-        columns=2,
-    )
-
-
-def api_health(url):
-    try:
-        response = requests.get(f"{url.rstrip('/')}/health", timeout=3)
-        if response.status_code < 400:
-            return "Healthy"
-        return "Unavailable"
-    except requests.RequestException:
-        return "Unavailable"
-
-
-def get_agent_api(path, params=None):
-    url = f"{AP_AGENT_BASE_URL}{path}"
-    try:
-        response = requests.get(url, params=params, timeout=60)
-        try:
-            data = response.json()
-        except ValueError:
-            data = {"raw_response": response.text}
-        return {
-            "ok": response.status_code < 400,
-            "status_code": response.status_code,
-            "data": data,
-            "error": None if response.status_code < 400 else data,
-            "url": url,
-        }
-    except requests.RequestException as exc:
-        return {
-            "ok": False,
-            "status_code": None,
-            "data": None,
-            "error": str(exc),
-            "url": url,
-        }
-
-
-def post_agent_api(path, payload=None, params=None):
-    url = f"{AP_AGENT_BASE_URL}{path}"
-    try:
-        response = requests.post(url, json=payload or {}, params=params, timeout=60)
-        try:
-            data = response.json()
-        except ValueError:
-            data = {"raw_response": response.text}
-        return {
-            "ok": response.status_code < 400,
-            "status_code": response.status_code,
-            "data": data,
-            "error": None if response.status_code < 400 else data,
-            "url": url,
-        }
-    except requests.RequestException as exc:
-        return {
-            "ok": False,
-            "status_code": None,
-            "data": None,
-            "error": str(exc),
-            "url": url,
-        }
-
-
-def render_technical_details(label, payload):
-    with st.expander(label):
-        st.json(payload or {})
-
-# -----------------------------------
-# PAGE CONFIG
-# -----------------------------------
-
-st.set_page_config(page_title="AP Automation Platform", layout="wide")
 st.markdown(
     """
     <style>
-    .block-container {padding-top: 1.5rem;}
-    .info-card {
+    .main .block-container {padding-top: 1.5rem;}
+    div[data-testid="stMetric"] {
         background: #ffffff;
-        border: 1px solid #e4e7ec;
-        border-radius: 8px;
-        padding: 0.85rem 1rem;
-        min-height: 88px;
-        margin-bottom: 0.75rem;
+        border: 1px solid #e6e9ef;
+        padding: 14px 16px;
+        border-radius: 14px;
+        box-shadow: 0 1px 3px rgba(16, 24, 40, 0.06);
+        min-height: 112px;
+        overflow: visible;
     }
-    .info-card-label {
-        color: #667085;
-        font-size: 0.85rem;
-        margin-bottom: 0.35rem;
-    }
-    .info-card-value {
-        color: #1d2939;
-        font-size: 1.15rem;
-        font-weight: 650;
-        line-height: 1.3;
+    div[data-testid="stMetricLabel"] p,
+    div[data-testid="stMetricValue"] > div,
+    div[data-testid="stMetricValue"] p,
+    div[data-testid="stMetricDelta"] > div {
+        max-width: 100%;
+        white-space: normal !important;
+        overflow: visible !important;
+        text-overflow: clip !important;
         overflow-wrap: anywhere;
         word-break: break-word;
     }
-    .info-card-help {
-        color: #667085;
-        font-size: 0.8rem;
-        margin-top: 0.35rem;
-        line-height: 1.3;
-        overflow-wrap: anywhere;
+    div[data-testid="stMetricLabel"] p {
+        line-height: 1.25;
     }
-    .status-badge {
-        display: inline-block;
-        border-radius: 999px;
-        padding: 0.18rem 0.55rem;
-        font-size: 0.8rem;
-        font-weight: 650;
-        margin-bottom: 0.3rem;
+    div[data-testid="stMetricValue"] {
+        width: 100%;
+        overflow: visible;
     }
+    div[data-testid="stMetricValue"] > div,
+    div[data-testid="stMetricValue"] p {
+        font-size: clamp(1rem, 1.7vw, 1.75rem);
+        line-height: 1.2;
+    }
+    .demo-card {
+        background: linear-gradient(135deg, #f8fbff 0%, #eef5ff 100%);
+        border: 1px solid #dbe7ff;
+        border-radius: 18px;
+        padding: 18px 20px;
+        margin-bottom: 18px;
+    }
+    .small-muted {color: #667085; font-size: 0.92rem;}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-def render_dashboard_control_tower():
-    st.title("Dashboard / Control Tower")
-    render_section_help(
-        "This page shows the overall AP automation status: invoice intake, validation progress, exceptions, posting, and reference data readiness."
+st.markdown(
+    """
+    <div class="demo-card">
+      <h1 style="margin-bottom: 0.25rem;">AP Automation Demo</h1>
+      <div class="small-muted">Invoice ingestion → PO/GRN validation → exception handling → SAP posting simulation.</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+reset_success_message = st.session_state.pop("demo_reset_success", None)
+if reset_success_message:
+    st.success(reset_success_message)
+    reset_result = st.session_state.pop("demo_reset_result", None)
+    if reset_result:
+        with st.expander("Reset details"):
+            st.json(reset_result)
+
+st.sidebar.header("Demo Navigation")
+st.sidebar.caption("Recommended flow: Dashboard → Demo Walkthrough → AP Agent Monitor")
+
+with st.sidebar.expander("Reset invoice demo flow", expanded=False):
+    render_invoice_flow_reset_panel(location="sidebar")
+
+st.sidebar.divider()
+st.sidebar.caption("Service Status")
+st.sidebar.write(f"AP Agent: {api_health(AP_AGENT_BASE_URL)}")
+st.sidebar.caption(AP_AGENT_BASE_URL)
+st.sidebar.write(f"Mock SAP API: {api_health(API_BASE_URL)}")
+st.sidebar.caption(API_BASE_URL)
+
+selected_module = st.sidebar.radio(
+    "Choose screen",
+    [
+        "Dashboard",
+        "Demo Walkthrough",
+        "AP Agent Monitor",
+        "Reference Data Sync (PO/GRN API)",
+        "Admin Data Manager",
+    ],
+)
+
+# ===================================
+# DASHBOARD
+# ===================================
+
+if selected_module == "Dashboard":
+    st.header("Demo Overview")
+
+    st.success(
+        "Demo flow: upload one invoice, run OCR + LLM extraction, save it to invoice_master, then show AP Agent validation, posting or exception handling."
     )
 
-    invoice_count = safe_table_count("invoice_master")
-    po_count = safe_table_count("sap_po_master")
-    grn_count = safe_table_count("sap_grn_master")
-    posted_reference_count = safe_table_count("sap_posted_invoice_master")
+    step1, step2, step3, step4 = st.columns(4)
+    with step1:
+        st.info("1. Upload Invoice")
+    with step2:
+        st.info("2. OCR + LLM Extract")
+    with step3:
+        st.info("3. AP Agent Checks")
+    with step4:
+        st.info("4. Post or Draft Email")
 
-    st.subheader("Demo Readiness")
-    render_metric_cards(
-        [
-            {
-                "title": "Invoice records",
-                "value": invoice_count,
-                "help_text": "Invoices received through upload or test entry",
-            },
-            {
-                "title": "PO records",
-                "value": po_count,
-                "help_text": "Purchase orders available for validation",
-            },
-            {
-                "title": "GRN records",
-                "value": grn_count,
-                "help_text": "Goods receipts available for matching",
-            },
-            {
-                "title": "Posted invoice references",
-                "value": posted_reference_count,
-                "help_text": "Used for duplicate / already-posted checks",
-            },
-        ],
-    )
+    col1, col2, col3,col4 = st.columns(4)
 
-    st.subheader("AP Agent Workflow Summary")
-    status_counts = {}
-    total_agent_invoices = 0
-    if not ap_agent_db_exists():
-        st.info("AP Agent records will appear after an invoice is processed.")
-    else:
-        summary_df = load_ap_agent_summary()
-        status_counts = get_status_counts(summary_df)
-        if not status_counts:
-            st.info("AP Agent records will appear after an invoice is processed.")
-        else:
-            total_agent_invoices = sum(status_counts.values())
-            render_metric_cards(
-                [
-                    {
-                        "title": "Total Agent Invoices",
-                        "value": total_agent_invoices,
-                        "help_text": "Invoices tracked by the AP Agent",
-                    },
-                    {
-                        "title": "Posted",
-                        "value": status_counts.get("POSTED", 0),
-                        "help_text": "Invoices posted successfully",
-                    },
-                    {
-                        "title": "Ready for Posting",
-                        "value": status_counts.get("READY_FOR_POSTING", 0),
-                        "help_text": "Invoices clean and ready to post",
-                    },
-                    {
-                        "title": "Exceptions",
-                        "value": status_counts.get("EXCEPTION_IDENTIFIED", 0),
-                        "help_text": "Invoices needing business action",
-                    },
-                    {
-                        "title": "Extraction Review",
-                        "value": status_counts.get("EXTRACTION_REVIEW_REQUIRED", 0),
-                        "help_text": "Invoices needing extraction review",
-                    },
-                    {
-                        "title": "Extraction Failed",
-                        "value": status_counts.get("EXTRACTION_FAILED", 0),
-                        "help_text": "Invoices not extracted reliably",
-                    },
-                    {
-                        "title": "Posting Failed",
-                        "value": status_counts.get("POSTING_FAILED", 0),
-                        "help_text": "Invoices that failed posting",
-                    },
-                ],
+    with col1:
+        try:
+            st.metric("Invoices Processed", get_table_count("invoice_master"))
+        except Exception:
+            st.metric("Invoices Processed", 0)
+
+    with col2:
+        try:
+            st.metric("PO Records", get_table_count("sap_po_master"))
+        except Exception:
+            st.metric("PO Records", 0)
+
+    with col3:
+        try:
+            st.metric("GRN Records", get_table_count("sap_grn_master"))
+        except Exception:
+            st.metric("GRN Records", 0)
+    with col4:
+        try:
+            st.metric(
+                "Posted Invoices",
+                get_table_count("sap_posted_invoice_master")
             )
+        except Exception:
+            st.metric("Posted Invoices", 0)
+    st.info("System ready for processing.")
 
-    st.subheader("Where Invoices Are Stuck")
-    stuck_meanings = {
-        "EXTRACTION_REVIEW_REQUIRED": "Invoice was extracted but needs review before AP validation.",
-        "EXTRACTION_FAILED": "Invoice could not be extracted reliably.",
-        "VALIDATION_IN_PROGRESS": "Invoice is still being checked by AP controls.",
-        "EXCEPTION_IDENTIFIED": "Invoice failed one or more blocking AP controls.",
-        "POSTING_FAILED": "Invoice passed validation but posting failed.",
-        "REPROCESS_REQUESTED": "Invoice is waiting for controlled recheck.",
-        "REPROCESS_FAILED": "Recheck was attempted but invoice still failed.",
-    }
-    stuck_cards = [
-        {
-            "title": normalize_status_label(status),
-            "value": count,
-            "help_text": stuck_meanings[status],
-        }
-        for status, count in (
-            (status, status_counts.get(status, 0))
-            for status in stuck_meanings
+    st.subheader("Recent Invoices")
+    try:
+        invoice_df = populate_display_due_dates(
+            load_table_data("invoice_master", limit=10)
         )
-        if count > 0
-    ]
-    if stuck_cards:
-        render_metric_cards(stuck_cards)
-    else:
-        st.success(
-            "No stuck invoices currently. All processed invoices are either posted, ready, or awaiting next upload."
+        invoice_df.index=(invoice_df.index+1)
+        invoice_df.index.name="R.no"
+        st.dataframe(invoice_df, use_container_width=True)
+    except Exception as e:
+        st.error(f"Invoice table error: {e}")
+
+    st.subheader("Recent Purchase Orders")
+    try:
+        po_df=load_table_data("sap_po_master", limit=10)
+        po_df.index=(po_df.index+1)
+        po_df.index.name="R.no"
+        st.dataframe(po_df, use_container_width=True)
+    except Exception as e:
+        st.error(f"PO table error: {e}")
+
+    st.subheader("Recent GRNs")
+    try:
+        grn_df=load_table_data("sap_grn_master", limit=10)
+        grn_df.index=(grn_df.index+1)
+        grn_df.index.name="R.no"
+        st.dataframe(grn_df, use_container_width=True)
+    except Exception as e:
+        st.error(f"GRN table error: {e}")
+
+    st.subheader("Recent Posted Invoices")
+    try:
+        posted_invoice_df = populate_display_due_dates(
+            load_table_data(
+                "sap_posted_invoice_master",
+                limit=10,
+            )
         )
-
-    st.subheader("Process Funnel")
-    received_count = max(invoice_count, total_agent_invoices)
-    extracted_count = sum(
-        status_counts.get(status, 0)
-        for status in [
-            "EXTRACTED",
-            "READY_FOR_POSTING",
-            "EXCEPTION_IDENTIFIED",
-            "POSTED",
-        ]
-    )
-    exception_ready_count = (
-        status_counts.get("EXCEPTION_IDENTIFIED", 0)
-        + status_counts.get("READY_FOR_POSTING", 0)
-    )
-    render_metric_cards(
-        [
-            {
-                "title": "Received",
-                "value": received_count,
-                "help_text": "Invoices available to the AP process",
-            },
-            {
-                "title": "Extracted",
-                "value": extracted_count,
-                "help_text": "Invoices extracted and ready for workflow checks",
-            },
-            {
-                "title": "Exception / Ready",
-                "value": exception_ready_count,
-                "help_text": "Invoices needing action or ready to post",
-            },
-            {
-                "title": "Posted",
-                "value": status_counts.get("POSTED", 0),
-                "help_text": "Invoices posted by the AP Agent",
-            },
-        ],
-    )
-
-    st.subheader("Recent Invoice Status")
-    if ap_agent_db_exists():
-        agent_df = load_ap_agent_invoices(limit=20)
-        business_dataframe(
-            agent_df,
-            [
-                "invoice_number",
-                "vendor_name",
-                "po_number",
-                "total_amount",
-                "status",
-                "posting_status",
-                "payment_status",
-                "exception_category",
-                "updated_at",
-            ],
-            "No AP Agent invoice records available yet.",
+        posted_invoice_df.index = posted_invoice_df.index + 1
+        posted_invoice_df.index.name = "R.no"
+        st.dataframe(
+            posted_invoice_df,
+            use_container_width=True
         )
-    else:
-        st.info("AP Agent records will appear after an invoice is processed.")
+    except Exception as e:
+        st.error(f"Posted invoice table error: {e}")
+# ===================================
+# DEMO WALKTHROUGH
+# ===================================
 
-    st.subheader("Reference Data Tables")
-    tabs = st.tabs(
-        [
-            "Invoices",
-            "POs",
-            "GRNs",
-            "Posted Invoice References",
-        ]
-    )
-    with tabs[0]:
-        render_full_master_table("invoice_master", "No invoice records found.")
-    with tabs[1]:
-        render_full_master_table("sap_po_master", "No purchase order records found.")
-    with tabs[2]:
-        render_full_master_table("sap_grn_master", "No GRN records found.")
-    with tabs[3]:
-        render_full_master_table(
-            "sap_posted_invoice_master",
-            "No posted invoice references found.",
-        )
+elif selected_module == "Demo Walkthrough":
+    st.header("Invoice Upload Walkthrough - End to End")
 
-    st.subheader("How to Use This Dashboard")
     st.info(
-        "Use this page before a demo to confirm PO/GRN data is loaded. After processing invoices, use it to see which invoices posted successfully and which invoices need action."
+        "Use this page for the client demo. Start with one invoice upload, then show "
+        "OCR + LLM extraction, invoice save, AP Agent validation, posting or exception, "
+        "and any drafted email communication on the same page."
     )
 
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        st.metric("Invoices", get_safe_table_count("invoice_master"))
+    with m2:
+        st.metric("PO Reference", get_safe_table_count("sap_po_master"))
+    with m3:
+        st.metric("GRN Reference", get_safe_table_count("sap_grn_master"))
+    with m4:
+        st.metric("Posted", get_safe_table_count("sap_posted_invoice_master"))
 
-def render_invoice_journey():
-    st.title("Invoice Journey")
-    render_section_help(
-        "Use this page to upload one invoice and follow what happens from document intake through extraction, AP validation, exception handling, recheck, posting, and audit."
+    st.divider()
+
+    st.markdown("### Step 1 - Upload invoice")
+    st.caption(
+        "Before this step, PO and GRN reference data should already exist in master. "
+        "Use Reference Data Sync only to refresh PO/GRN data. This page does not create demo PO, GRN, or invoice content."
     )
 
-    st.subheader("Demo Readiness Check")
-    po_count = safe_table_count("sap_po_master")
-    grn_count = safe_table_count("sap_grn_master")
-    agent_available = ap_agent_db_exists()
-    render_metric_cards(
-        [
-            {
-                "title": "PO records available",
-                "value": po_count,
-                "help_text": "Reference data for PO matching",
-            },
-            {
-                "title": "GRN records available",
-                "value": grn_count,
-                "help_text": "Reference data for goods receipt matching",
-            },
-            {
-                "title": "AP Agent status",
-                "value": "Available" if agent_available else "Waiting",
-                "help_text": "Records appear after first invoice processing",
-            },
-        ],
-        columns=3,
+    uploaded_file = st.file_uploader(
+        "Upload invoice PDF or image",
+        type=["pdf", "png", "jpg", "jpeg"],
+        key="walkthrough_invoice_upload",
     )
-    if po_count == 0:
-        st.warning("Load or create PO reference data before testing PO matching.")
-    if grn_count == 0:
-        st.warning("Load or create GRN reference data before testing GRN matching.")
-    if not agent_available:
-        st.info("AP Agent records will appear after the first invoice is processed.")
 
-    st.subheader("Upload Invoice")
+    if uploaded_file:
+        st.success(f"Selected invoice file: {uploaded_file.name}")
+
+        if st.button(
+            "Process uploaded invoice end-to-end",
+            key="walkthrough_process_uploaded_invoice",
+            type="primary",
+            use_container_width=True,
+        ):
+            with st.spinner(
+                "Running OCR, LLM extraction, saving invoice, and triggering AP Agent..."
+            ):
+                try:
+                    saved_file_path, artifact_bundle = save_uploaded_file(uploaded_file)
+                    result = process_invoice_pipeline(
+                        saved_file_path,
+                        artifact_bundle=artifact_bundle,
+                    )
+
+                    st.session_state["last_upload_pipeline_result"] = result
+                    st.session_state["last_upload_file_name"] = uploaded_file.name
+
+                    parsed_json = result.get("parsed_json") or {}
+                    invoice_number = parsed_json.get("invoice_number")
+
+                    if invoice_number:
+                        st.session_state["current_uploaded_invoice_number"] = str(invoice_number)
+
+                    st.cache_data.clear()
+                    st.rerun()
+
+                except Exception as e:
+                    st.exception(e)
+
+    pipeline_result = st.session_state.get("last_upload_pipeline_result")
+    if pipeline_result:
+        st.markdown("### Step 2 - OCR + LLM extraction result")
+
+        status = pipeline_result.get("status", "failed")
+        if status == "success":
+            st.success("Invoice OCR and LLM extraction completed.")
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("OCR Time", f"{pipeline_result.get('ocr_time_sec', 'N/A')} sec")
+            with col2:
+                st.metric("LLM Time", f"{pipeline_result.get('groq_time_sec', 'N/A')} sec")
+            with col3:
+                st.metric("Total Time", f"{pipeline_result.get('total_time_sec', 'N/A')} sec")
+
+            parsed_json = pipeline_result.get("parsed_json", {})
+            invoice_number = parsed_json.get("invoice_number")
+
+            st.subheader("Extracted invoice dashboard")
+            render_extracted_invoice_tiles(parsed_json)
+            st.subheader("Extraction quality dashboard")
+            render_extraction_quality_tiles(parsed_json, validation_df=None, parsed_json=parsed_json)
+
+            if invoice_number:
+                st.success(
+                    f"Invoice `{invoice_number}` was extracted and should now be saved in invoice_master."
+                )
+            else:
+                st.warning(
+                    "OCR/LLM completed, but no invoice number was extracted. "
+                    "The invoice cannot be shown in the AP Agent flow until invoice_number is available."
+                )
+
+            with st.expander("Show extracted invoice JSON", expanded=False):
+                st.json(parsed_json)
+
+            if parsed_json.get("ap_agent_trigger_error"):
+                st.warning(
+                    "Invoice was extracted, but AP Agent trigger failed. "
+                    "Make sure AP Agent API is running on port 8000."
+                )
+                st.code(parsed_json.get("ap_agent_trigger_error"), language="text")
+
+        else:
+            error_text = str(
+                pipeline_result.get("error")
+                or pipeline_result.get("message")
+                or pipeline_result
+            )
+            st.error("Invoice processing failed.")
+            st.code(error_text, language="text")
+
+            lower_error = error_text.lower()
+            if (
+                "fitz" in lower_error
+                or "pymupdf" in lower_error
+                or "paddle" in lower_error
+                or "no module named" in lower_error
+            ):
+                st.warning(
+                    "OCR dependencies are missing in this environment. "
+                    "Install the optional OCR packages only if you want PDF/Image upload processing."
+                )
+                st.code(
+                    "python -m pip install PyMuPDF==1.27.2.3 paddleocr==2.7.3 paddlepaddle==2.6.2 protobuf==3.20.2",
+                    language="powershell",
+                )
+            elif "groq" in lower_error or "api_key" in lower_error or "api key" in lower_error:
+                st.warning(
+                    "LLM extraction needs GROQ_API_KEY in your .env file."
+                )
+
+    st.divider()
+
+    st.markdown("### Step 3 - AP Agent review and final result")
+    invoice_options = load_invoice_options(limit=500)
+    current_uploaded_invoice = st.session_state.get("current_uploaded_invoice_number")
+
+    if current_uploaded_invoice and current_uploaded_invoice not in invoice_options:
+        invoice_options = [current_uploaded_invoice] + invoice_options
+
+    if not invoice_options:
+        st.warning(
+            "No saved invoice is available yet. Upload and process an invoice first. "
+            "If the invoice was processed but not saved, check that invoice_number was extracted and the database path is valid."
+        )
+    else:
+        default_index = 0
+        if current_uploaded_invoice in invoice_options:
+            default_index = invoice_options.index(current_uploaded_invoice)
+
+        selected_invoice_for_demo = st.selectbox(
+            "Invoice to show end-to-end",
+            invoice_options,
+            index=default_index,
+            key="selected_uploaded_invoice_walkthrough",
+        )
+
+        st.caption(
+            "For deeper history or older invoices, open AP Agent Monitor. "
+            "This page is for the single-invoice client walkthrough."
+        )
+        render_single_invoice_walkthrough(selected_invoice_for_demo)
+
+# ===================================
+# STRUCTURED INGESTION
+# ===================================
+
+elif selected_module == "Reference Data Sync (PO/GRN API)":
+    st.header("Reference Data Sync")
+
+    st.info(
+        "Invoices are no longer synced from the API. "
+        "Invoices enter through PDF/Image upload or Manual Invoice Entry. "
+        "This page syncs only PO and GRN reference data."
+    )
+
+    st.write(
+        """
+        Sync structured reference records from:
+        - SAP Purchase Orders
+        - SAP GRNs
+        """
+    )
+
+    if st.button("Start Structured Sync"):
+        with st.spinner("Running structured ingestion..."):
+            try:
+                result = sync_structured_sources()
+                st.write(result)
+
+                status = result.get("status", "failed")
+                if status == "success":
+                    st.success("Structured ingestion completed.")
+                    details = result.get("details", {})
+
+                    col1, col2, col3 = st.columns(3)
+
+                    with col1:
+                        st.metric(
+                            "API Invoices Synced",
+                            details.get("invoice_count", 0)
+                        )
+                        st.caption(
+                            "Expected value is 0. "
+                            "Invoices are upload/manual-entry only."
+                        )
+
+                    with col2:
+                        st.metric(
+                            "PO Records Synced",
+                            details.get("po_count", 0)
+                        )
+
+                    with col3:
+                        st.metric(
+                            "GRN Records Synced",
+                            details.get("grn_count", 0)
+                        )
+
+                    st.info(
+                        f"Total Sync Time: {result.get('total_time_sec', 'N/A')} sec"
+                    )
+                else:
+                    st.error(
+                        f"Sync Failed: {result.get('error', result.get('message', 'Unknown error'))}"
+                    )
+            except Exception as e:
+                st.exception(e)
+
+
+# ===================================
+# INVOICE PROCESSING
+# ===================================
+
+elif selected_module == "Invoice Processing (PDF/Image)":
+    st.header("Invoice OCR & AI Extraction")
+
     uploaded_file = st.file_uploader("Upload Invoice", type=["pdf", "png", "jpg", "jpeg"])
 
     if uploaded_file:
@@ -1383,1705 +2495,289 @@ def render_invoice_journey():
                         saved_file_path,
                         artifact_bundle=artifact_bundle,
                     )
-                    render_technical_details("Processing details", result)
+                    st.write(result)
 
                     status = result.get("status", "failed")
                     if status == "success":
-                        st.success("Invoice uploaded and processed.")
-                        parsed_payload = result.get("parsed_json", {})
-                        normalized_payload = normalize_parsed_invoice_payload(parsed_payload)
-                        invoice_number = extracted_value(
-                            normalized_payload,
-                            ["invoice_number", "invoice_no", "number"],
-                            default=None,
-                        )
-                        if invoice_number:
-                            st.session_state["last_processed_invoice_number"] = invoice_number
+                        st.success("Invoice processed successfully.")
 
-                        render_metric_cards(
-                            [
-                                {
-                                    "title": "OCR time",
-                                    "value": f"{result.get('ocr_time_sec', 'N/A')} sec",
-                                    "help_text": "Document text extraction",
-                                },
-                                {
-                                    "title": "AI extraction time",
-                                    "value": f"{result.get('groq_time_sec', 'N/A')} sec",
-                                    "help_text": "Structured invoice parsing",
-                                },
-                                {
-                                    "title": "Total time",
-                                    "value": f"{result.get('total_time_sec', 'N/A')} sec",
-                                    "help_text": "End-to-end processing time",
-                                },
-                            ],
-                            columns=3,
-                        )
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("OCR Time", f"{result.get('ocr_time_sec', 'N/A')} sec")
+                        with col2:
+                            st.metric("Groq Time", f"{result.get('groq_time_sec', 'N/A')} sec")
+                        with col3:
+                            st.metric("Total Time", f"{result.get('total_time_sec', 'N/A')} sec")
 
                         st.subheader("Extracted Invoice Data")
-                        render_extracted_business_fields(parsed_payload)
-                        render_technical_details("Technical details — extracted payload", parsed_payload)
+                        st.json(result.get("parsed_json", {}))
                     else:
                         st.error(
-                            f"Processing failed: {result.get('error', result.get('message', 'Unknown error'))}"
+                            f"Processing Failed: {result.get('error', result.get('message', 'Unknown error'))}"
                         )
-                        render_technical_details("Technical details — processing result", result)
                 except Exception as e:
                     st.exception(e)
 
-    st.subheader("Follow an Existing Invoice")
-    if not ap_agent_db_exists():
-        st.info("AP Agent records will appear after processing.")
-        return
+# ===================================
+# AP AGENT MONITOR
+# ===================================
 
-    agent_df = load_ap_agent_invoices(limit=100)
-    if agent_df.empty or "invoice_number" not in agent_df.columns:
-        st.info("No AP Agent invoice records are available yet.")
-        return
+elif selected_module == "AP Agent Monitor":
 
-    invoice_options = agent_df["invoice_number"].dropna().unique().tolist()
-    if not invoice_options:
-        st.info("No AP Agent invoice records are available yet.")
-        return
+    st.header("AP Agent Processing Monitor")
 
-    default_invoice = st.session_state.get("last_processed_invoice_number")
-    selected_index = 0
-    if default_invoice in invoice_options:
-        selected_index = invoice_options.index(default_invoice)
-    selected_invoice_number = st.selectbox(
-        "Select invoice",
-        invoice_options,
-        index=selected_index,
-        key="invoice_journey_selected_invoice",
-    )
-    selected_rows = agent_df[agent_df["invoice_number"] == selected_invoice_number]
-    if selected_rows.empty:
-        st.info("Selected invoice is no longer available.")
-        return
-    selected_invoice = selected_rows.iloc[0]
-
-    validation_df = load_ap_agent_validation_results(selected_invoice_number)
-    communication_df = load_ap_agent_communications(selected_invoice_number)
-    events_df = load_ap_agent_events(selected_invoice_number)
-
-    st.subheader("Selected Invoice")
-    workflow_status = current_row_value(selected_invoice, ["status", "workflow_status", "agent_status"])
-    posting_status = current_row_value(selected_invoice, ["posting_status"])
-    payment_status = current_row_value(selected_invoice, ["payment_status"])
-    render_metric_cards(
-        [
-            {
-                "title": "Invoice number",
-                "value": current_row_value(selected_invoice, ["invoice_number"]),
-                "help_text": "",
-            },
-            {
-                "title": "Vendor",
-                "value": current_row_value(selected_invoice, ["vendor_name"]),
-                "help_text": "",
-            },
-            {
-                "title": "PO number",
-                "value": current_row_value(selected_invoice, ["po_number"]),
-                "help_text": "",
-            },
-            {
-                "title": "Amount",
-                "value": current_row_value(selected_invoice, ["total_amount", "document_total", "amount"]),
-                "help_text": "",
-            },
-            {
-                "title": "Workflow status",
-                "value": workflow_status,
-                "help_text": "Current AP Agent state",
-            },
-            {
-                "title": "Posting status",
-                "value": posting_status,
-                "help_text": "Posting outcome, if attempted",
-            },
-            {
-                "title": "Payment status",
-                "value": payment_status,
-                "help_text": "Tracked separately from posting",
-            },
-        ],
-        columns=4,
-    )
-
-    st.subheader("Invoice Journey Tracker")
-    render_invoice_journey_tracker(
-        selected_invoice,
-        validation_df,
-        communication_df,
-        events_df,
-    )
-
-    st.subheader("Extraction Quality")
-    quality_values = [
-        current_row_value(selected_invoice, ["extraction_quality_status"], default=None),
-        current_row_value(selected_invoice, ["extraction_confidence"], default=None),
-        current_row_value(selected_invoice, ["extraction_retry_count"], default=None),
-        current_row_value(selected_invoice, ["extraction_review_reason"], default=None),
-    ]
-    if all(value is None for value in quality_values):
-        st.info(
-            "Extraction quality details are not available in the current AP Agent table, but validation and workflow status are shown below."
-        )
-    else:
-        render_metric_cards(
-            [
-                {
-                    "title": "Quality status",
-                    "value": quality_values[0] or "—",
-                    "help_text": "Extraction gate result",
-                },
-                {
-                    "title": "Confidence",
-                    "value": quality_values[1] or "—",
-                    "help_text": "AI extraction confidence",
-                },
-                {
-                    "title": "Retry count",
-                    "value": quality_values[2] or "—",
-                    "help_text": "Extraction retry attempts",
-                },
-                {
-                    "title": "Review reason",
-                    "value": quality_values[3] or "—",
-                    "help_text": "Reason review is needed",
-                },
-            ],
-        )
-
-    st.subheader("AP Validation Summary")
-    passed_controls = 0
-    failed_blocking = 0
-    warning_controls = 0
-    if validation_df.empty:
-        st.info("No validation results found for this invoice yet.")
-    else:
-        for _, row in validation_df.iterrows():
-            severity = str(row.get("severity", "")).upper()
-            passed = str(row.get("passed")).lower() in {"true", "1", "yes"}
-            if severity in {"WARNING", "WARN"}:
-                warning_controls += 1
-            elif passed:
-                passed_controls += 1
-            else:
-                failed_blocking += 1
-        render_metric_cards(
-            [
-                {
-                    "title": "Passed controls",
-                    "value": passed_controls,
-                    "help_text": "Controls that passed",
-                },
-                {
-                    "title": "Failed blocking controls",
-                    "value": failed_blocking,
-                    "help_text": "Controls that block progress",
-                },
-                {
-                    "title": "Warning/advisory controls",
-                    "value": warning_controls,
-                    "help_text": "Advisory or warning checks",
-                },
-            ],
-            columns=3,
-        )
-        validation_groups = [
-            ("PO", ["PO"]),
-            ("GRN", ["GRN"]),
-            ("Vendor", ["VENDOR"]),
-            ("Duplicate", ["DUP"]),
-            ("Financial", ["FIN", "AMOUNT", "PRICE", "TOTAL"]),
-            ("Tax", ["TAX", "VAT", "GST"]),
-            ("Payment Terms", ["PAYMENT", "TERMS"]),
-            ("Date", ["DATE"]),
-            ("Consumption", ["CONSUMPTION", "LEDGER", "CUMULATIVE"]),
-            ("Other", []),
-        ]
-        tabs = st.tabs([group[0] for group in validation_groups])
-        assigned_indexes = set()
-        for tab, (group_name, tokens) in zip(tabs, validation_groups):
-            with tab:
-                if tokens:
-                    matching_indexes = []
-                    for index, row in validation_df.iterrows():
-                        haystack = " ".join(
-                            str(row.get(column, ""))
-                            for column in ["rule_code", "rule_name", "message"]
-                            if column in validation_df.columns
-                        ).upper()
-                        if any(token in haystack for token in tokens):
-                            matching_indexes.append(index)
-                            assigned_indexes.add(index)
-                    group_df = validation_df.loc[matching_indexes]
-                else:
-                    group_df = validation_df.drop(index=list(assigned_indexes))
-                business_dataframe(
-                    group_df,
-                    ["rule_code", "rule_name", "passed", "severity", "message"],
-                    f"No {group_name.lower()} validation results.",
-                )
-
-    st.subheader("Exception / Status")
-    status_text = str(workflow_status)
-    status_messages = {
-        "POSTED": "Invoice was posted. Payment status is tracked separately.",
-        "READY_FOR_POSTING": "All blocking controls passed. Invoice is ready for posting.",
-        "EXCEPTION_IDENTIFIED": "Invoice failed one or more blocking controls. Review failed rules and communication.",
-        "EXTRACTION_REVIEW_REQUIRED": "Invoice extraction needs review before AP validation.",
-        "EXTRACTION_FAILED": "Invoice could not be extracted reliably.",
-        "POSTING_FAILED": "Invoice passed validation but posting failed.",
-    }
-    render_metric_cards(
-        [
-            {
-                "title": "Current workflow status",
-                "value": workflow_status,
-                "help_text": "Current AP Agent status",
-            },
-            {
-                "title": "What it means",
-                "value": status_messages.get(status_text, "Review workflow events for latest status."),
-                "help_text": "Business explanation",
-            },
-            {
-                "title": "Recommended next action",
-                "value": status_messages.get(status_text, "Review workflow events for latest status."),
-                "help_text": "Next step",
-            },
-        ],
-        columns=3,
-    )
-
-    st.subheader("Communication and Audit Preview")
-    business_dataframe(
-        communication_df,
-        ["status", "recipient", "subject", "created_at", "direction"],
-        "No communication has been drafted for this invoice.",
-    )
-    if communication_df is not None and not communication_df.empty and "body" in communication_df.columns:
-        latest_body = communication_df.iloc[0].get("body", "")
-        with st.expander("Latest communication body"):
-            st.code(str(latest_body), language="text")
-    business_dataframe(
-        events_df.head(10) if events_df is not None and not events_df.empty else events_df,
-        ["created_at", "event_type", "agent_name", "message"],
-        "No audit events found for this invoice.",
-    )
-
-    st.subheader("Posting and Payment")
-    render_metric_cards(
-        [
-            {
-                "title": "Posting status",
-                "value": posting_status,
-                "help_text": "Whether the invoice was posted",
-            },
-            {
-                "title": "Payment status",
-                "value": payment_status,
-                "help_text": "ERP/payment-run state",
-            },
-        ],
-        columns=2,
-    )
-    st.info(
-        "Posting confirms invoice posting. Payment status is separate and should come from ERP/payment-run data. The demo should not mark an invoice as paid just because it was posted."
-    )
-
-    st.subheader("Technical Details")
-    render_technical_details("Selected invoice raw row", selected_invoice.to_dict())
-    render_technical_details(
-        "Validation raw data",
-        validation_df.to_dict(orient="records") if validation_df is not None else {},
-    )
-    render_technical_details(
-        "Communication raw data",
-        communication_df.to_dict(orient="records") if communication_df is not None else {},
-    )
-    render_technical_details(
-        "Events raw data",
-        events_df.to_dict(orient="records") if events_df is not None else {},
-    )
-
-
-def render_ap_agent_workbench():
-    st.title("AP Agent Workbench")
-    render_section_help(
-        "Use this page to inspect everything the AP Agent did for a selected invoice — validations, exceptions, communication, recheck events, posting attempts, and audit trail."
+    st.write(
+        """
+        This view shows what happened after invoices entered the AP Agent workflow:
+        - Posted invoices
+        - Exception invoices
+        - Failed validation rules
+        - Posting attempts
+        - Agent workflow events
+        """
     )
 
     if not ap_agent_db_exists():
+
         st.warning(
-            "AP Agent database not found yet. Process an invoice first from Invoice Journey."
+            "The AP Agent database is unavailable or its schema has not been initialized. "
+            "For AWS/RDS, run scripts/test_rds_connection.py, "
+            "scripts/init_rds_schema.py and scripts/check_rds_schema.py."
         )
-        return
 
-    summary_df = load_ap_agent_summary()
-    agent_df = load_ap_agent_invoices(limit=500)
+    else:
 
-    if agent_df.empty:
-        st.info("No AP Agent invoice records found yet. Upload or create an invoice to begin.")
-        return
+        summary_df = load_ap_agent_summary()
 
-    st.subheader("Status Summary")
-    status_counts = get_status_counts(summary_df)
-    render_metric_cards(
-        [
-            {
-                "title": "Total Agent Records",
-                "value": sum(status_counts.values()) if status_counts else len(agent_df),
-                "help_text": "Invoices tracked by the AP Agent",
-            },
-            {
-                "title": "Posted",
-                "value": status_counts.get("POSTED", 0),
-                "help_text": "Posted successfully",
-            },
-            {
-                "title": "Ready for Posting",
-                "value": status_counts.get("READY_FOR_POSTING", 0),
-                "help_text": "Passed blocking controls",
-            },
-            {
-                "title": "Exceptions",
-                "value": status_counts.get("EXCEPTION_IDENTIFIED", 0),
-                "help_text": "Needs action",
-            },
-            {
-                "title": "Extraction Review",
-                "value": status_counts.get("EXTRACTION_REVIEW_REQUIRED", 0),
-                "help_text": "Needs extraction review",
-            },
-            {
-                "title": "Posting Failed",
-                "value": status_counts.get("POSTING_FAILED", 0),
-                "help_text": "Posting attempt failed",
-            },
-        ],
-        columns=3,
-    )
+        if summary_df.empty:
 
-    st.subheader("Find an Invoice")
-    filtered_df = agent_df.copy()
-    if "agent_status" in filtered_df.columns and "status" not in filtered_df.columns:
-        filtered_df["status"] = filtered_df["agent_status"]
-
-    search_text = st.text_input(
-        "Search invoice, vendor, or PO",
-        key="agent_workbench_search",
-    ).strip().lower()
-    if search_text:
-        searchable_columns = [
-            column
-            for column in ["invoice_number", "vendor_name", "po_number"]
-            if column in filtered_df.columns
-        ]
-        if searchable_columns:
-            mask = filtered_df[searchable_columns].fillna("").astype(str).apply(
-                lambda row: search_text in " ".join(row).lower(),
-                axis=1,
+            st.info(
+                "No AP Agent records found yet."
             )
-            filtered_df = filtered_df[mask]
 
-    filter_cols = st.columns(3)
-    with filter_cols[0]:
-        status_options = ["All"]
-        if "status" in filtered_df.columns:
-            status_options.extend(
-                sorted(
-                    value
-                    for value in filtered_df["status"].dropna().astype(str).unique()
-                    if value
+        else:
+
+            st.subheader("AP Agent Status Summary")
+
+            status_counts = {
+                row["status"]: row["total"]
+                for _, row in summary_df.iterrows()
+            }
+
+            col1, col2, col3, col4 = st.columns(4)
+
+            with col1:
+                st.metric(
+                    "Posted",
+                    status_counts.get("POSTED", 0)
                 )
-            )
-        selected_status = st.selectbox(
-            "Status",
-            status_options,
-            key="agent_workbench_status_filter",
-        )
-    with filter_cols[1]:
-        vendor_options = ["All"]
-        if "vendor_name" in filtered_df.columns:
-            vendor_options.extend(
-                sorted(
-                    value
-                    for value in filtered_df["vendor_name"].dropna().astype(str).unique()
-                    if value
+
+            with col2:
+                st.metric(
+                    "Exceptions",
+                    status_counts.get("EXCEPTION_IDENTIFIED", 0)
                 )
+
+            with col3:
+                st.metric(
+                    "Extracted",
+                    status_counts.get("EXTRACTED", 0)
+                )
+
+            with col4:
+                st.metric(
+                    "Total Agent Records",
+                    int(summary_df["total"].sum())
+                )
+
+            st.dataframe(
+                summary_df,
+                use_container_width=True
             )
-        selected_vendor = st.selectbox(
-            "Vendor",
-            vendor_options,
-            key="agent_workbench_vendor_filter",
-        )
-    with filter_cols[2]:
-        rows_to_show = st.number_input(
+
+        st.divider()
+
+        st.subheader("AP Agent Invoice Status")
+
+        limit = st.number_input(
             "Rows to show",
             min_value=10,
             max_value=500,
             value=50,
-            step=10,
-            key="agent_workbench_rows",
+            step=10
         )
 
-    if selected_status != "All" and "status" in filtered_df.columns:
-        filtered_df = filtered_df[filtered_df["status"].astype(str) == selected_status]
-    if selected_vendor != "All" and "vendor_name" in filtered_df.columns:
-        filtered_df = filtered_df[filtered_df["vendor_name"].astype(str) == selected_vendor]
-
-    filtered_df = filtered_df.head(int(rows_to_show))
-    business_dataframe(
-        filtered_df,
-        [
-            "invoice_number",
-            "vendor_name",
-            "po_number",
-            "total_amount",
-            "document_total",
-            "amount",
-            "status",
-            "posting_status",
-            "payment_status",
-            "exception_category",
-            "updated_at",
-            "created_at",
-        ],
-        "No invoices match the selected filters.",
-    )
-
-    if filtered_df.empty or "invoice_number" not in filtered_df.columns:
-        st.info("No invoices match the selected filters.")
-        return
-
-    invoice_options = filtered_df["invoice_number"].dropna().astype(str).unique().tolist()
-    if not invoice_options:
-        st.info("No invoices match the selected filters.")
-        return
-
-    selected_invoice = st.selectbox(
-        "Select invoice",
-        invoice_options,
-        key="agent_workbench_invoice_selector",
-    )
-    selected_rows = filtered_df[filtered_df["invoice_number"].astype(str) == selected_invoice]
-    if selected_rows.empty:
-        st.info("Selected invoice is not available after filtering.")
-        return
-    selected_invoice_row = selected_rows.iloc[0]
-
-    validation_df = load_ap_agent_validation_results(selected_invoice)
-    communication_df = load_ap_agent_communications(selected_invoice)
-    events_df = load_ap_agent_events(selected_invoice)
-    exception_df = load_exception_cases_for_invoice(selected_invoice)
-    posting_df = load_posting_attempts_for_invoice(selected_invoice)
-    ledger_df = load_consumption_ledger_for_invoice(selected_invoice)
-
-    st.subheader(f"Invoice Command Center — {selected_invoice}")
-    workflow_status = current_row_value(selected_invoice_row, ["status", "workflow_status", "agent_status"])
-    posting_status = current_row_value(selected_invoice_row, ["posting_status"])
-    payment_status = current_row_value(selected_invoice_row, ["payment_status"])
-    render_metric_cards(
-        [
-            {
-                "title": "Invoice number",
-                "value": current_row_value(selected_invoice_row, ["invoice_number"]),
-                "help_text": "",
-            },
-            {
-                "title": "Vendor",
-                "value": current_row_value(selected_invoice_row, ["vendor_name"]),
-                "help_text": "",
-            },
-            {
-                "title": "PO number",
-                "value": current_row_value(selected_invoice_row, ["po_number"]),
-                "help_text": "",
-            },
-            {
-                "title": "Amount",
-                "value": current_row_value(selected_invoice_row, ["total_amount", "document_total", "amount"]),
-                "help_text": "",
-            },
-            {
-                "title": "Workflow status",
-                "value": workflow_status,
-                "help_text": "Current AP Agent state",
-            },
-            {
-                "title": "Posting status",
-                "value": posting_status,
-                "help_text": "Posting outcome",
-            },
-            {
-                "title": "Payment status",
-                "value": payment_status,
-                "help_text": "Payment-run state",
-            },
-            {
-                "title": "Last updated",
-                "value": current_row_value(selected_invoice_row, ["updated_at"]),
-                "help_text": "",
-            },
-        ],
-        columns=4,
-    )
-    render_status_explanation(workflow_status, posting_status, payment_status)
-
-    st.subheader("Journey Tracker")
-    render_invoice_journey_tracker(
-        selected_invoice_row,
-        validation_df,
-        communication_df,
-        events_df,
-    )
-
-    tab_overview, tab_validation, tab_exceptions, tab_communication, tab_events, tab_posting, tab_technical = st.tabs(
-        [
-            "Overview",
-            "Validation Controls",
-            "Exceptions",
-            "Communication",
-            "Recheck / Events",
-            "Posting / Ledger",
-            "Technical Data",
-        ]
-    )
-
-    with tab_overview:
-        st.subheader("Invoice Overview")
-        business_dataframe(
-            selected_rows,
-            [
-                "invoice_number",
-                "vendor_name",
-                "po_number",
-                "total_amount",
-                "status",
-                "posting_status",
-                "payment_status",
-                "exception_category",
-                "updated_at",
-            ],
-            "Selected invoice details are unavailable.",
+        agent_df = load_ap_agent_invoices(
+            limit=limit
         )
-        render_status_explanation(workflow_status, posting_status, payment_status)
-        extraction_values = [
-            current_row_value(selected_invoice_row, ["extraction_quality_status"], default=None),
-            current_row_value(selected_invoice_row, ["extraction_confidence"], default=None),
-            current_row_value(selected_invoice_row, ["extraction_retry_count"], default=None),
-            current_row_value(selected_invoice_row, ["extraction_review_reason"], default=None),
-        ]
-        if any(value is not None for value in extraction_values):
-            st.subheader("Extraction Quality")
-            render_metric_cards(
-                [
-                    {
-                        "title": "Quality status",
-                        "value": extraction_values[0] or "—",
-                        "help_text": "Extraction gate result",
-                    },
-                    {
-                        "title": "Confidence",
-                        "value": extraction_values[1] or "—",
-                        "help_text": "AI extraction confidence",
-                    },
-                    {
-                        "title": "Retry count",
-                        "value": extraction_values[2] or "—",
-                        "help_text": "Extraction retry attempts",
-                    },
-                    {
-                        "title": "Review reason",
-                        "value": extraction_values[3] or "—",
-                        "help_text": "Why review is needed",
-                    },
-                ],
-                columns=4,
+
+        if agent_df.empty:
+
+            st.info(
+                "No AP Agent invoice records available."
             )
-        business_dataframe(
-            events_df.head(5) if events_df is not None and not events_df.empty else events_df,
-            ["created_at", "event_type", "agent_name", "message"],
-            "No workflow events found.",
-        )
 
-    with tab_validation:
-        if validation_df.empty:
-            st.info("No validation controls found yet for this invoice.")
         else:
-            passed_controls = 0
-            failed_blocking = 0
-            warning_controls = 0
-            for _, row in validation_df.iterrows():
-                severity = str(row.get("severity", "")).upper()
-                passed = str(row.get("passed")).lower() in {"true", "1", "yes"}
-                if severity in {"WARNING", "WARN"}:
-                    warning_controls += 1
-                elif passed:
-                    passed_controls += 1
-                else:
-                    failed_blocking += 1
-            render_metric_cards(
-                [
-                    {
-                        "title": "Total controls",
-                        "value": len(validation_df),
-                        "help_text": "All AP validation checks",
-                    },
-                    {
-                        "title": "Passed",
-                        "value": passed_controls,
-                        "help_text": "Controls that passed",
-                    },
-                    {
-                        "title": "Failed blocking",
-                        "value": failed_blocking,
-                        "help_text": "Blocking failures",
-                    },
-                    {
-                        "title": "Warnings",
-                        "value": warning_controls,
-                        "help_text": "Advisory controls",
-                    },
-                ],
-                columns=4,
+
+            agent_df.index = agent_df.index + 1
+            agent_df.index.name = "R.no"
+
+            st.dataframe(
+                agent_df,
+                use_container_width=True
             )
-            validation_groups = [
-                ("PO", ["PO"]),
-                ("GRN", ["GRN"]),
-                ("Vendor", ["VENDOR"]),
-                ("Duplicate", ["DUP"]),
-                ("Financial", ["FIN", "AMOUNT", "PRICE", "TOTAL"]),
-                ("Tax", ["TAX", "VAT", "GST"]),
-                ("Payment Terms", ["PAYMENT", "TERMS"]),
-                ("Date", ["DATE"]),
-                ("Consumption", ["CONSUMPTION", "LEDGER", "CUMULATIVE"]),
-                ("Other", []),
-            ]
-            validation_tabs = st.tabs([group[0] for group in validation_groups])
-            assigned_indexes = set()
-            for tab, (group_name, tokens) in zip(validation_tabs, validation_groups):
-                with tab:
-                    if tokens:
-                        matching_indexes = []
-                        for index, row in validation_df.iterrows():
-                            haystack = " ".join(
-                                str(row.get(column, ""))
-                                for column in ["rule_code", "rule_name", "message"]
-                                if column in validation_df.columns
-                            ).upper()
-                            if any(token in haystack for token in tokens):
-                                matching_indexes.append(index)
-                                assigned_indexes.add(index)
-                        group_df = validation_df.loc[matching_indexes]
-                    else:
-                        group_df = validation_df.drop(index=list(assigned_indexes))
-                    business_dataframe(
-                        group_df,
-                        ["rule_code", "rule_name", "passed", "severity", "message", "created_at"],
-                        f"No {group_name.lower()} validation controls found.",
+
+            st.divider()
+
+            st.subheader("Invoice Drilldown")
+
+            invoice_options = agent_df["invoice_number"].dropna().unique().tolist()
+
+            selected_invoice = st.selectbox(
+                "Select Invoice",
+                invoice_options
+            )
+
+            if selected_invoice:
+
+                st.markdown(
+                    f"### Selected Invoice: `{selected_invoice}`"
+                )
+
+                selected_row = agent_df[
+                    agent_df["invoice_number"] == selected_invoice
+                ]
+
+                st.write(
+                    selected_row
+                )
+
+                st.subheader("Validation Results")
+
+                validation_df = load_ap_agent_validation_results(
+                    selected_invoice
+                )
+
+                if validation_df.empty:
+                    st.info("No validation results found.")
+                else:
+                    st.dataframe(
+                        validation_df,
+                        use_container_width=True
+                    )
+                st.subheader("Email / Communication")
+
+                communication_df = load_ap_agent_communications(
+                    selected_invoice
+                )
+
+                if communication_df.empty:
+
+                    st.info(
+                        "No email communication created for this invoice. "
+                        "Clean posted invoices normally do not generate emails."
                     )
 
-    with tab_exceptions:
-        if exception_df.empty:
-            st.info("No exception records found for this invoice.")
-        else:
-            open_count = 0
-            if "status" in exception_df.columns:
-                open_count = int((exception_df["status"].astype(str).str.upper() == "OPEN").sum())
-            owner = current_row_value(exception_df.iloc[0], ["owner"], default="—")
-            render_metric_cards(
-                [
-                    {
-                        "title": "Total exceptions",
-                        "value": len(exception_df),
-                        "help_text": "Exception case records",
-                    },
-                    {
-                        "title": "Open exceptions",
-                        "value": open_count,
-                        "help_text": "Still needs action",
-                    },
-                    {
-                        "title": "Resolved exceptions",
-                        "value": max(len(exception_df) - open_count, 0),
-                        "help_text": "Closed or resolved",
-                    },
-                    {
-                        "title": "Owner / team",
-                        "value": owner,
-                        "help_text": "Current owner",
-                    },
-                ],
-                columns=4,
-            )
-            business_dataframe(
-                exception_df,
-                ["category", "description", "status", "owner", "created_at", "updated_at"],
-                "No exception records found for this invoice.",
-            )
-
-    with tab_communication:
-        if communication_df.empty:
-            st.info(
-                "No communication generated for this invoice. Clean invoices normally do not generate exception emails."
-            )
-        else:
-            latest = communication_df.iloc[0]
-            render_metric_cards(
-                [
-                    {
-                        "title": "Total messages",
-                        "value": len(communication_df),
-                        "help_text": "Communication records",
-                    },
-                    {
-                        "title": "Latest status",
-                        "value": current_row_value(latest, ["status"]),
-                        "help_text": "Most recent communication",
-                    },
-                    {
-                        "title": "Latest recipient",
-                        "value": current_row_value(latest, ["recipient"]),
-                        "help_text": "Recipient or team",
-                    },
-                    {
-                        "title": "Latest direction",
-                        "value": current_row_value(latest, ["direction"]),
-                        "help_text": "Inbound or outbound",
-                    },
-                ],
-                columns=4,
-            )
-            business_dataframe(
-                communication_df,
-                ["created_at", "direction", "recipient", "subject", "status", "smtp_message_id"],
-                "No communication generated for this invoice.",
-            )
-            if "body" in communication_df.columns:
-                for _, communication in communication_df.iterrows():
-                    subject = communication.get("subject", "Message")
-                    with st.expander(f"Message body — {subject}"):
-                        st.code(str(communication.get("body", "")), language="text")
-
-    with tab_events:
-        if events_df.empty:
-            st.info("No workflow events found.")
-        else:
-            latest_event = events_df.iloc[0]
-            render_metric_cards(
-                [
-                    {
-                        "title": "Event count",
-                        "value": len(events_df),
-                        "help_text": "Workflow audit events",
-                    },
-                    {
-                        "title": "Latest event type",
-                        "value": current_row_value(latest_event, ["event_type"]),
-                        "help_text": "Most recent event",
-                    },
-                    {
-                        "title": "Latest event timestamp",
-                        "value": current_row_value(latest_event, ["created_at"]),
-                        "help_text": "Most recent update",
-                    },
-                    {
-                        "title": "Response received",
-                        "value": "Yes" if event_contains(events_df, ["RESPONSE", "EVIDENCE", "FIELD_UPDATED"]) else "No",
-                        "help_text": "Response/evidence captured",
-                    },
-                    {
-                        "title": "Recheck happened",
-                        "value": "Yes" if event_contains(events_df, ["RECHECK", "REPROCESS"]) else "No",
-                        "help_text": "Controlled recheck activity",
-                    },
-                ],
-                columns=3,
-            )
-            business_dataframe(
-                events_df,
-                ["created_at", "event_type", "agent_name", "message"],
-                "No workflow events found.",
-            )
-
-    with tab_posting:
-        sap_document_number = "—"
-        if not posting_df.empty:
-            sap_document_number = current_row_value(posting_df.iloc[0], ["sap_document_number"])
-        render_metric_cards(
-            [
-                {
-                    "title": "Posting status",
-                    "value": posting_status,
-                    "help_text": "Posting and payment are separate",
-                },
-                {
-                    "title": "Payment status",
-                    "value": payment_status,
-                    "help_text": "ERP/payment-run status",
-                },
-                {
-                    "title": "Posting attempts",
-                    "value": len(posting_df),
-                    "help_text": "Posting attempt records",
-                },
-                {
-                    "title": "SAP document number",
-                    "value": sap_document_number,
-                    "help_text": "Returned by posting flow when available",
-                },
-            ],
-            columns=4,
-        )
-        st.info("Posting and payment are separate. A posted invoice is not automatically paid.")
-        business_dataframe(
-            posting_df,
-            ["created_at", "status", "sap_document_number", "message", "attempt_number"],
-            "Posting attempt details are not available yet.",
-        )
-        business_dataframe(
-            ledger_df,
-            [
-                "po_number",
-                "gr_number",
-                "grn_number",
-                "invoice_number",
-                "line_no",
-                "consumed_qty",
-                "consumed_amount",
-                "remaining_qty",
-                "remaining_amount",
-                "created_at",
-            ],
-            "Consumption ledger details are not available yet.",
-        )
-
-    with tab_technical:
-        render_technical_details("Selected invoice raw row", selected_invoice_row.to_dict())
-        render_technical_details(
-            "Validation raw data",
-            validation_df.to_dict(orient="records") if validation_df is not None else {},
-        )
-        render_technical_details(
-            "Exception raw data",
-            exception_df.to_dict(orient="records") if exception_df is not None else {},
-        )
-        render_technical_details(
-            "Communication raw data",
-            communication_df.to_dict(orient="records") if communication_df is not None else {},
-        )
-        render_technical_details(
-            "Events raw data",
-            events_df.to_dict(orient="records") if events_df is not None else {},
-        )
-        render_technical_details(
-            "Posting attempts raw data",
-            posting_df.to_dict(orient="records") if posting_df is not None else {},
-        )
-        render_technical_details(
-            "Consumption ledger raw data",
-            ledger_df.to_dict(orient="records") if ledger_df is not None else {},
-        )
-
-
-def render_response_recheck_demo():
-    st.title("Response & Recheck Demo")
-    render_section_help(
-        "Use this page to simulate how AP captures a supplier or procurement response, updates the exception context, and runs a controlled recheck before posting."
-    )
-    if not ap_agent_db_exists():
-        st.warning("AP Agent database not found yet. Process an invoice first from Invoice Journey.")
-        return
-
-    agent_df = load_ap_agent_invoices(limit=100)
-    if agent_df.empty or "invoice_number" not in agent_df.columns:
-        st.info("No AP Agent invoices found yet.")
-        return
-
-    working_df = agent_df.copy()
-    if "agent_status" in working_df.columns and "status" not in working_df.columns:
-        working_df["status"] = working_df["agent_status"]
-
-    preferred_statuses = {
-        "EXCEPTION_IDENTIFIED",
-        "REPROCESS_REQUESTED",
-        "REPROCESS_FAILED",
-        "EXTRACTION_REVIEW_REQUIRED",
-        "POSTING_FAILED",
-    }
-    status_column = "status" if "status" in working_df.columns else "agent_status"
-    if status_column in working_df.columns:
-        preferred_df = working_df[
-            working_df[status_column].astype(str).str.upper().isin(preferred_statuses)
-        ]
-    else:
-        preferred_df = working_df.iloc[0:0]
-
-    if preferred_df.empty:
-        st.info(
-            "No exception or recheck-ready invoices were found. Showing all invoices so you can still inspect the response/recheck flow."
-        )
-        selector_df = working_df
-    else:
-        selector_df = preferred_df
-
-    invoice_options = selector_df["invoice_number"].dropna().astype(str).unique().tolist()
-    if not invoice_options:
-        st.info("No AP Agent invoices found yet.")
-        return
-
-    selected_invoice = st.selectbox(
-        "Select invoice for response/recheck demo",
-        invoice_options,
-        key="response_recheck_invoice",
-    )
-    selected_rows = working_df[working_df["invoice_number"].astype(str) == selected_invoice]
-    if selected_rows.empty:
-        st.info("Selected invoice is no longer available.")
-        return
-    selected_invoice_row = selected_rows.iloc[0]
-
-    validation_df = load_ap_agent_validation_results(selected_invoice)
-    communication_df = load_ap_agent_communications(selected_invoice)
-    events_df = load_ap_agent_events(selected_invoice)
-    exception_df = load_exception_cases_for_invoice(selected_invoice)
-    identity_df = load_agent_invoice_identity(selected_invoice)
-
-    blocking_df = failed_blocking_controls(validation_df)
-    exception_count = 0 if exception_df is None or exception_df.empty else len(exception_df)
-    communication_count = 0 if communication_df is None or communication_df.empty else len(communication_df)
-    event_count = 0 if events_df is None or events_df.empty else len(events_df)
-    failed_count = 0 if blocking_df is None or blocking_df.empty else len(blocking_df)
-
-    baseline_key = f"response_recheck_baseline_{selected_invoice}"
-    if baseline_key not in st.session_state:
-        st.session_state[baseline_key] = {
-            "workflow": current_row_value(selected_invoice_row, ["status", "workflow_status", "agent_status"]),
-            "posting": current_row_value(selected_invoice_row, ["posting_status"]),
-            "payment": current_row_value(selected_invoice_row, ["payment_status"]),
-            "failed_controls": failed_count,
-            "communications": communication_count,
-            "events": event_count,
-            "response_received": event_contains(events_df, ["RESPONSE", "EVIDENCE", "FIELD_UPDATED"]),
-            "recheck_happened": event_contains(events_df, ["RECHECK", "REPROCESS"]),
-        }
-
-    st.subheader("Selected Invoice")
-    business_dataframe(
-        selected_rows,
-        [
-            "invoice_number",
-            "vendor_name",
-            "po_number",
-            "total_amount",
-            "status",
-            "posting_status",
-            "payment_status",
-            "exception_category",
-            "updated_at",
-        ],
-        "Selected invoice details are unavailable.",
-    )
-
-    render_metric_cards(
-        [
-            {
-                "title": "Invoice number",
-                "value": current_row_value(selected_invoice_row, ["invoice_number"]),
-                "help_text": "",
-            },
-            {
-                "title": "Vendor",
-                "value": current_row_value(selected_invoice_row, ["vendor_name"]),
-                "help_text": "",
-            },
-            {
-                "title": "PO",
-                "value": current_row_value(selected_invoice_row, ["po_number"]),
-                "help_text": "",
-            },
-            {
-                "title": "Amount",
-                "value": current_row_value(selected_invoice_row, ["total_amount"]),
-                "help_text": current_row_value(selected_invoice_row, ["currency"], ""),
-            },
-            {
-                "title": "Workflow",
-                "value": current_row_value(selected_invoice_row, ["status", "workflow_status", "agent_status"]),
-                "help_text": "Current AP Agent state",
-            },
-            {
-                "title": "Posting",
-                "value": current_row_value(selected_invoice_row, ["posting_status"]),
-                "help_text": "Posting is separate from payment",
-            },
-            {
-                "title": "Payment",
-                "value": current_row_value(selected_invoice_row, ["payment_status"]),
-                "help_text": "Do not infer paid from posted",
-            },
-            {
-                "title": "Exceptions",
-                "value": exception_count,
-                "help_text": f"{failed_count} blocking control(s)",
-            },
-        ],
-        columns=4,
-    )
-
-    st.subheader("What Is Blocking This Invoice?")
-    business_dataframe(
-        blocking_df,
-        ["rule_code", "rule_name", "severity", "message"],
-        "No failed blocking controls are visible for this invoice.",
-    )
-
-    st.subheader("Current Communication")
-    if communication_df is None or communication_df.empty:
-        st.info("No communication has been drafted or received for this invoice yet.")
-    else:
-        latest_communication = communication_df.iloc[0]
-        render_metric_cards(
-            [
-                {
-                    "title": "Recipient",
-                    "value": current_row_value(latest_communication, ["recipient"]),
-                    "help_text": "",
-                },
-                {
-                    "title": "Subject",
-                    "value": current_row_value(latest_communication, ["subject"]),
-                    "help_text": "",
-                },
-                {
-                    "title": "Status",
-                    "value": current_row_value(latest_communication, ["status"]),
-                    "help_text": current_row_value(latest_communication, ["direction"], ""),
-                },
-                {
-                    "title": "Created",
-                    "value": current_row_value(latest_communication, ["created_at"]),
-                    "help_text": "",
-                },
-            ],
-            columns=4,
-        )
-        with st.expander("Communication body"):
-            st.code(str(latest_communication.get("body", "")), language="text")
-
-    if exception_df is not None and not exception_df.empty:
-        if "status" in exception_df.columns:
-            open_exceptions = exception_df[
-                exception_df["status"].astype(str).str.upper().isin({"OPEN", "ACTIVE"})
-            ]
-        else:
-            open_exceptions = exception_df.iloc[0:0]
-        active_exception = open_exceptions.iloc[0] if not open_exceptions.empty else exception_df.iloc[0]
-    else:
-        active_exception = None
-    exception_id = None
-    if active_exception is not None:
-        exception_id = current_row_value(active_exception, ["exception_id"], default=None)
-
-    invoice_id = None
-    if identity_df is not None and not identity_df.empty:
-        invoice_id = current_row_value(identity_df.iloc[0], ["invoice_id"], default=None)
-
-    st.subheader("Mock Response Input")
-    response_templates = [
-        "Supplier confirms GRN completed",
-        "Supplier provides corrected PO number",
-        "Procurement confirms PO reopened",
-        "Supplier confirms corrected tax/VAT amount",
-        "Supplier confirms payment terms",
-        "General clarification",
-        "Custom response",
-    ]
-    template_name = st.selectbox(
-        "Response template",
-        response_templates,
-        key="response_recheck_template",
-    )
-    template_text = build_mock_response_template(
-        template_name,
-        selected_invoice_row,
-        validation_df,
-    )
-
-    with st.form("response_recheck_form"):
-        response_text = st.text_area(
-            "Mock supplier/procurement response",
-            value=template_text,
-            height=140,
-            key=f"response_recheck_text_{selected_invoice}",
-        )
-        col1, col2 = st.columns(2)
-        with col1:
-            responder_name = st.text_input(
-                "Responder name",
-                value="Demo Procurement User",
-                key=f"response_recheck_responder_name_{selected_invoice}",
-            )
-            response_source = st.text_input(
-                "Response source",
-                value="demo_ui",
-                key=f"response_recheck_source_{selected_invoice}",
-            )
-        with col2:
-            responder_email = st.text_input(
-                "Responder email",
-                value="procurement.demo@example.com",
-                key=f"response_recheck_responder_email_{selected_invoice}",
-            )
-            evidence_reference = st.text_input(
-                "Evidence reference",
-                value="Demo response captured in Streamlit",
-                key=f"response_recheck_evidence_{selected_invoice}",
-            )
-        submit_response = st.form_submit_button("Submit Response")
-
-    if submit_response:
-        if not exception_id:
-            st.warning(
-                "Response intake needs an exception on this invoice. Select an invoice with an exception, or create communication first from the AP Agent Workbench."
-            )
-        elif not response_text.strip():
-            st.warning("Enter a response before submitting.")
-        else:
-            source_lookup = {
-                "demo_ui": "MANUAL_TEST",
-                "supplier": "VENDOR",
-                "vendor": "VENDOR",
-                "procurement": "PROCUREMENT",
-                "ap": "AP",
-                "master_data": "MASTER_DATA",
-                "erp": "ERP",
-            }
-            api_source = source_lookup.get(
-                str(response_source or "").strip().lower(),
-                str(response_source or "MANUAL_TEST").strip().upper(),
-            )
-            payload = {
-                "exception_id": exception_id,
-                "source": api_source,
-                "response_text": response_text.strip(),
-                "provided_by": responder_name or responder_email or "Demo UI",
-                "values": {
-                    "invoice_number": selected_invoice,
-                    "responder_name": responder_name,
-                    "responder_email": responder_email,
-                    "response_source": response_source,
-                    "evidence_reference": evidence_reference,
-                },
-                "resume_recheck": False,
-            }
-            result = post_agent_api(
-                EXCEPTION_RESPONSE_ENDPOINT_TEMPLATE.format(exception_id=exception_id),
-                payload=payload,
-            )
-            st.session_state["last_response_submit_result"] = result
-            st.session_state["last_response_text"] = response_text.strip()
-            if result.get("ok"):
-                st.success("Response was recorded by the AP Agent.")
-            else:
-                st.error("Response intake failed. See technical details below.")
-
-    st.subheader("Controlled Recheck")
-    st.info(
-        "Controlled recheck should run only after a response or evidence has been captured. It should not blindly reprocess every invoice."
-    )
-    col_recheck, col_refresh = st.columns(2)
-    with col_recheck:
-        if st.button("Run Controlled Recheck", key="response_recheck_run"):
-            if not invoice_id:
-                st.warning("Controlled recheck needs the AP Agent invoice ID, but it was not found for this invoice.")
-            else:
-                payload = {
-                    "latest_message": st.session_state.get("last_response_text"),
-                    "simulate_resolution": False,
-                }
-                result = post_agent_api(
-                    CONTROLLED_RECHECK_ENDPOINT_TEMPLATE.format(invoice_id=invoice_id),
-                    payload=payload,
-                )
-                st.session_state["last_recheck_result"] = result
-                if result.get("ok"):
-                    st.success("Controlled recheck completed.")
                 else:
-                    st.error("Controlled recheck failed. See technical details below.")
-    with col_refresh:
-        if st.button("Refresh Invoice State", key="response_recheck_refresh"):
-            st.rerun()
 
-    agent_df = load_ap_agent_invoices(limit=100)
-    working_df = agent_df.copy()
-    if "agent_status" in working_df.columns and "status" not in working_df.columns:
-        working_df["status"] = working_df["agent_status"]
-    refreshed_rows = working_df[working_df["invoice_number"].astype(str) == selected_invoice]
-    if not refreshed_rows.empty:
-        selected_invoice_row = refreshed_rows.iloc[0]
-    validation_df = load_ap_agent_validation_results(selected_invoice)
-    communication_df = load_ap_agent_communications(selected_invoice)
-    events_df = load_ap_agent_events(selected_invoice)
-    exception_df = load_exception_cases_for_invoice(selected_invoice)
-    blocking_df = failed_blocking_controls(validation_df)
+                    latest_email = communication_df.iloc[0]
 
-    baseline = st.session_state.get(baseline_key, {})
-    after_failed_count = 0 if blocking_df is None or blocking_df.empty else len(blocking_df)
-    after_communication_count = 0 if communication_df is None or communication_df.empty else len(communication_df)
-    after_event_count = 0 if events_df is None or events_df.empty else len(events_df)
-    response_received = event_contains(events_df, ["RESPONSE", "EVIDENCE", "FIELD_UPDATED"])
-    recheck_happened = event_contains(events_df, ["RECHECK", "REPROCESS"])
-    payment_terms_summary = response_recheck_payment_terms_summary(events_df)
+                    e1, e2, e3 = st.columns(3)
 
-    st.subheader("Extracted Response Evidence")
-    render_metric_cards(
-        [
-            {
-                "title": "Approved terms",
-                "value": payment_terms_summary["payment_terms"],
-                "help_text": "Extracted from response evidence",
-            },
-            {
-                "title": "Master updated",
-                "value": payment_terms_summary["master_updated"],
-                "help_text": "PO/master or invoice master update event",
-            },
-            {
-                "title": "Update target",
-                "value": payment_terms_summary["master_target"],
-                "help_text": "Where payment terms were applied",
-            },
-        ],
-        columns=3,
-    )
+                    with e1:
+                        st.metric(
+                            "Email Status",
+                            latest_email.get("status", "—")
+                        )
 
-    st.subheader("Before/After Demo Evidence")
-    render_metric_cards(
-        [
-            {
-                "title": "Workflow",
-                "value": f"{baseline.get('workflow', '—')} → {current_row_value(selected_invoice_row, ['status', 'workflow_status', 'agent_status'])}",
-                "help_text": "Before and current status",
-            },
-            {
-                "title": "Posting",
-                "value": f"{baseline.get('posting', '—')} → {current_row_value(selected_invoice_row, ['posting_status'])}",
-                "help_text": "Posting status",
-            },
-            {
-                "title": "Payment",
-                "value": f"{baseline.get('payment', '—')} → {current_row_value(selected_invoice_row, ['payment_status'])}",
-                "help_text": "Payment remains separate",
-            },
-            {
-                "title": "Failed controls",
-                "value": f"{baseline.get('failed_controls', 0)} → {after_failed_count}",
-                "help_text": "Blocking validation controls",
-            },
-            {
-                "title": "Communications",
-                "value": f"{baseline.get('communications', 0)} → {after_communication_count}",
-                "help_text": "Outbound and inbound messages",
-            },
-            {
-                "title": "Audit events",
-                "value": f"{baseline.get('events', 0)} → {after_event_count}",
-                "help_text": "Workflow evidence",
-            },
-            {
-                "title": "Response received",
-                "value": "Yes" if response_received else "No",
-                "help_text": "Response/evidence event found",
-            },
-            {
-                "title": "Recheck happened",
-                "value": "Yes" if recheck_happened else "No",
-                "help_text": "Recheck/reprocess event found",
-            },
-        ],
-        columns=4,
-    )
+                    with e2:
+                        st.metric(
+                            "Recipient",
+                            latest_email.get("recipient", "—")
+                        )
 
-    st.subheader("Recheck Timeline")
-    business_dataframe(
-        events_df.head(10) if events_df is not None and not events_df.empty else events_df,
-        ["created_at", "event_type", "agent_name", "message"],
-        "No workflow events found for this invoice.",
-    )
-    if events_df is not None and not events_df.empty:
-        event_text = events_df.fillna("").astype(str).apply(
-            lambda row: " ".join(row.values).upper(),
-            axis=1,
-        )
-        related_events = events_df[
-            event_text.str.contains("RESPONSE|EVIDENCE|FIELD_UPDATED|RECHECK|REPROCESS", regex=True)
-        ]
-    else:
-        related_events = events_df
-    business_dataframe(
-        related_events,
-        ["created_at", "event_type", "agent_name", "message"],
-        "No response or recheck-specific events found yet.",
-    )
+                    with e3:
+                        st.metric(
+                            "Direction",
+                            latest_email.get("direction", "—")
+                        )
 
-    st.subheader("Posting and Payment")
-    render_status_explanation(
-        current_row_value(selected_invoice_row, ["status", "workflow_status", "agent_status"]),
-        current_row_value(selected_invoice_row, ["posting_status"]),
-        current_row_value(selected_invoice_row, ["payment_status"]),
-    )
+                    st.dataframe(
+                        communication_df[
+                            [
+                                "created_at",
+                                "direction",
+                                "recipient",
+                                "subject",
+                                "status",
+                                "smtp_message_id",
+                            ]
+                        ],
+                        use_container_width=True,
+                    )
+
+                    st.markdown("### Email Message")
+
+                    for _, communication in communication_df.iterrows():
+
+                        st.markdown(
+                            f"**{communication.get('subject', '')}**"
+                        )
+
+                        st.caption(
+                            f"To: {communication.get('recipient', 'Not configured')} "
+                            f"· Status: {communication.get('status', '')} "
+                            f"· Created: {communication.get('created_at', '')}"
+                        )
+
+                        st.code(
+                            communication.get("body", ""),
+                            language="text",
+                        )
+
+                        st.divider()
+
+                
+                st.subheader("Workflow Events")
+
+                events_df = load_ap_agent_events(
+                    selected_invoice
+                )
+
+                if events_df.empty:
+                    st.info("No workflow events found.")
+                else:
+                    st.dataframe(
+                        events_df,
+                        use_container_width=True
+                    )
+# ===================================
+# MANUAL DATA ENTRY
+# ===================================
+
+elif selected_module == "Test Data Setup (Manual Invoice + PO/GRN API)":
+    st.header("Test Data Setup")
+
     st.info(
-        "Posting confirms accounting handoff. Payment is a separate ERP/payment-run lifecycle and should not be marked paid by this demo action."
+        "Manual invoice entry now writes directly to invoice_master "
+        "and triggers AP Agent. It does not create a source invoice API record. "
+        "PO and GRN entries still use the mock SAP API for reference data setup."
     )
 
-    st.subheader("Technical Details")
-    render_technical_details("Selected invoice raw row", selected_invoice_row.to_dict())
-    render_technical_details(
-        "Validation raw data",
-        validation_df.to_dict(orient="records") if validation_df is not None else {},
-    )
-    render_technical_details(
-        "Communication raw data",
-        communication_df.to_dict(orient="records") if communication_df is not None else {},
-    )
-    render_technical_details(
-        "Events raw data",
-        events_df.to_dict(orient="records") if events_df is not None else {},
-    )
-    render_technical_details(
-        "Exception raw data",
-        exception_df.to_dict(orient="records") if exception_df is not None else {},
-    )
-    render_technical_details(
-        "Last response submit result",
-        st.session_state.get("last_response_submit_result", {}),
-    )
-    render_technical_details(
-        "Last recheck result",
-        st.session_state.get("last_recheck_result", {}),
-    )
-
-def render_reference_data_test_setup():
-    st.title("Reference Data & Test Setup")
-    render_section_help(
-        "Use this page to prepare PO and GRN reference data for invoice validation. Invoices should normally enter through the Invoice Journey page using PDF/Image upload."
-    )
-
-    st.subheader("Reference Data Readiness")
-    mock_sap_status = api_health(API_BASE_URL)
-    po_count = safe_table_count("sap_po_master")
-    grn_count = safe_table_count("sap_grn_master")
-    invoice_count = safe_table_count("invoice_master")
-    render_metric_cards(
+    tab1, tab2, tab3 = st.tabs(
         [
-            {
-                "title": "Mock SAP API",
-                "value": mock_sap_status,
-                "help_text": "Used to create or sync PO and GRN records",
-            },
-            {
-                "title": "Master PO count",
-                "value": po_count,
-                "help_text": "Reference PO rows available for validation",
-            },
-            {
-                "title": "Master GRN count",
-                "value": grn_count,
-                "help_text": "Reference GRN rows available for matching",
-            },
-            {
-                "title": "Invoice count",
-                "value": invoice_count,
-                "help_text": "Invoices in the local master table",
-            },
-        ],
-        columns=4,
-    )
-    if po_count == 0:
-        st.warning("Create or sync PO data before testing PO validation.")
-    if grn_count == 0:
-        st.warning("Create or sync GRN data before testing GRN matching.")
-    if mock_sap_status != "Healthy":
-        st.warning("Start the Mock SAP API on port 8001 before creating or syncing PO/GRN records.")
-
-    st.subheader("Recommended Setup Flow")
-    st.markdown(
-        """
-        1. Create or seed PO records.
-        2. Create or seed GRN records.
-        3. Click Start Structured Sync.
-        4. Go to Invoice Journey and upload an invoice.
-        5. Use AP Agent Workbench or Response & Recheck Demo for investigation.
-        """
-    )
-
-    tab_sync, tab_po, tab_grn, tab_invoice, tab_tables = st.tabs(
-        [
-            "Structured Sync",
+            "Create Manual Invoice",
             "Create PO",
             "Create GRN",
-            "Manual Invoice Entry",
-            "Reference Tables",
         ]
     )
 
-    with tab_sync:
-        st.subheader("Structured Sync")
-        st.info(
-            "Invoices are not synced from Mock API. Invoices enter through PDF/Image upload or manual entry."
-        )
-        st.write("Sync structured reference records from Mock SAP API into the local AP master reference tables.")
-
-        if st.button("Start Structured Sync", key="start_structured_sync_reference_setup"):
-            with st.spinner("Running structured ingestion..."):
-                try:
-                    result = sync_structured_sources()
-                    status = result.get("status", "failed")
-                    if status == "success":
-                        st.success("Structured ingestion completed.")
-                        details = result.get("details", {})
-                        render_metric_cards(
-                            [
-                                {
-                                    "title": "PO records synced",
-                                    "value": details.get("po_count", 0),
-                                    "help_text": "Purchase order reference rows",
-                                },
-                                {
-                                    "title": "GRN records synced",
-                                    "value": details.get("grn_count", 0),
-                                    "help_text": "Goods receipt reference rows",
-                                },
-                                {
-                                    "title": "Invoice records synced",
-                                    "value": "Not used",
-                                    "help_text": f"Mock API invoice sync count: {details.get('invoice_count', 0)}",
-                                },
-                                {
-                                    "title": "Total sync time",
-                                    "value": f"{result.get('total_time_sec', 'N/A')} sec",
-                                    "help_text": "Structured sync runtime",
-                                },
-                            ],
-                            columns=4,
-                        )
-                    else:
-                        st.error(
-                            f"Sync failed: {result.get('error', result.get('message', 'Unknown error'))}"
-                        )
-                    render_technical_details("Technical sync details", result)
-                except Exception as exc:
-                    st.error("Structured sync failed. Check the Mock SAP API and database connection.")
-                    render_technical_details(
-                        "Technical sync details",
-                        {"error": str(exc), "error_type": type(exc).__name__},
-                    )
-
-    with tab_po:
+    # ===================================
+    # CREATE INVOICE
+    # ===================================
+    with tab1:
         try:
-            st.subheader("Create Mock Purchase Order")
-            st.info("This creates PO data in Mock SAP API. Run Structured Sync afterward to copy it into the AP master reference table.")
-
-            col1, col2 = st.columns(2)
-            with col1:
-                po_number = st.text_input("PO Number", key="po_number_input")
-                po_vendor_name = st.text_input("Vendor Name", key="po_vendor_name_input")
-                po_date = st.date_input("PO Date", key="po_date_input")
-            with col2:
-                po_currency = st.selectbox("Currency", options=["INR", "USD", "EUR", "GBP"], index=0, key="po_currency_input")
-                vat_percent = st.number_input("VAT %", min_value=0.0, max_value=100.0, value=18.0, key="po_vat_percent_input")
-                po_status = st.selectbox("PO Status", options=["Open", "Closed", "Cancelled", "Partially Received"], key="po_status_input")
-
-            po_subtotal, po_line_items = render_line_items_editor(
-                state_key="po_line_items",
-                prefix="po",
-                title="PO Line Items",
-                qty_label="Quantity",
-                qty_min=1,
-            )
-
-            st.subheader("PO Totals")
-            tax_amount = po_subtotal * (vat_percent / 100)
-            po_document_total = po_subtotal + tax_amount
-
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Subtotal", f"{po_subtotal:.2f} {po_currency}")
-            with col2:
-                st.metric("Tax Amount", f"{tax_amount:.2f} {po_currency}")
-            with col3:
-                st.metric("Total", f"{po_document_total:.2f} {po_currency}")
-
-            if st.button("Create Purchase Order", key="create_po_button"):
-                try:
-                    validation_errors = []
-                    if not po_number.strip():
-                        validation_errors.append("PO Number is required.")
-                    if not po_vendor_name.strip():
-                        validation_errors.append("Vendor Name is required.")
-                    valid_lines = [
-                        item for item in po_line_items
-                        if str(item.get("description", "")).strip()
-                        and float(item.get("line_amount", 0) or 0) > 0
-                    ]
-                    if not valid_lines:
-                        validation_errors.append("Add at least one PO line item with a description and positive amount.")
-                    if validation_errors:
-                        for message in validation_errors:
-                            st.warning(message)
-                    else:
-                        payload = {
-                            "document_type": "po",
-                            "po_number": po_number,
-                            "vendor_name": po_vendor_name,
-                            "po_date": str(po_date),
-                            "currency": po_currency,
-                            "document_subtotal": po_subtotal,
-                            "tax_amount": tax_amount,
-                            "vat_percent": vat_percent,
-                            "document_total": po_document_total,
-                            "amount": po_document_total,
-                            "po_status": po_status,
-                            "line_items": po_line_items,
-                            "last_modified": datetime.now().isoformat(),
-                        }
-
-                        response = requests.post(
-                            f"{API_BASE_URL}/sap/po",
-                            json=payload,
-                            auth=(SAP_USERNAME, SAP_PASSWORD),
-                            timeout=60,
-                        )
-
-                        try:
-                            response_payload = response.json()
-                        except ValueError:
-                            response_payload = {"raw_response": response.text}
-
-                        if response.status_code == 200:
-                            st.success("PO created in Mock SAP API. Now run Structured Sync to copy it into the AP master reference table.")
-                        else:
-                            st.error(f"Error creating PO: {response.text}")
-                        render_technical_details("Technical PO API response", response_payload)
-                except Exception as exc:
-                    st.error("PO creation failed. Check that Mock SAP API is running.")
-                    render_technical_details(
-                        "Technical PO API response",
-                        {"error": str(exc), "error_type": type(exc).__name__},
-                    )
-        except Exception as po_exception:
-            st.error(f"Error in PO creation form: {po_exception}")
-
-    with tab_grn:
-        try:
-            st.subheader("Create Mock GRN")
-            st.info("This creates GRN data in Mock SAP API. Run Structured Sync afterward to copy it into the AP master reference table.")
-
-            col1, col2 = st.columns(2)
-            with col1:
-                gr_number = st.text_input("GRN Number", key="grn_number_input")
-                po_number = st.text_input("Related PO Number", key="grn_po_number_input")
-                vendor_name = st.text_input("Vendor Name", key="grn_vendor_name_input")
-            with col2:
-                gr_date = st.date_input("GRN Date", key="grn_date_input")
-                currency = st.selectbox("Currency", options=["INR", "USD", "EUR", "GBP"], index=0, key="grn_currency_input")
-                gr_status = st.selectbox(
-                    "GRN Status",
-                    options=["Received", "Partially Received", "Pending"],
-                    key="grn_status_input",
-                )
-
-            grn_subtotal, grn_line_items = render_line_items_editor(
-                state_key="grn_line_items",
-                prefix="grn",
-                title="GRN Line Items",
-                qty_label="Received Quantity",
-                qty_min=0,
-            )
-
-            st.subheader("GRN Total")
-            grn_document_total = grn_subtotal
-
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Document Subtotal", f"{grn_subtotal:.2f} {currency}")
-            with col2:
-                st.metric("Total Amount", f"{grn_document_total:.2f} {currency}")
-
-            if st.button("Create GRN", key="create_grn_button"):
-                try:
-                    validation_errors = []
-                    if not gr_number.strip():
-                        validation_errors.append("GRN Number is required.")
-                    if not po_number.strip():
-                        validation_errors.append("Related PO Number is required.")
-                    if not vendor_name.strip():
-                        validation_errors.append("Vendor Name is required.")
-                    valid_lines = [
-                        item for item in grn_line_items
-                        if float(item.get("qty", 0) or 0) > 0
-                        or float(item.get("line_amount", 0) or 0) > 0
-                    ]
-                    if not valid_lines:
-                        validation_errors.append("Add at least one GRN line item with positive received quantity or amount.")
-                    if validation_errors:
-                        for message in validation_errors:
-                            st.warning(message)
-                    else:
-                        payload = {
-                            "document_type": "grn",
-                            "gr_number": gr_number,
-                            "po_number": po_number,
-                            "vendor_name": vendor_name,
-                            "gr_date": str(gr_date),
-                            "currency": currency,
-                            "document_subtotal": grn_subtotal,
-                            "document_total": grn_document_total,
-                            "amount": grn_document_total,
-                            "gr_status": gr_status,
-                            "line_items": grn_line_items,
-                            "last_modified": datetime.now().isoformat(),
-                        }
-
-                        response = requests.post(
-                            f"{API_BASE_URL}/sap/gr",
-                            json=payload,
-                            auth=(SAP_USERNAME, SAP_PASSWORD),
-                            timeout=60,
-                        )
-
-                        try:
-                            response_payload = response.json()
-                        except ValueError:
-                            response_payload = {"raw_response": response.text}
-
-                        if response.status_code == 200:
-                            st.success("GRN created in Mock SAP API. Now run Structured Sync to copy it into the AP master reference table.")
-                        else:
-                            st.error(f"Error creating GRN: {response.text}")
-                        render_technical_details("Technical GRN API response", response_payload)
-                except Exception as exc:
-                    st.error("GRN creation failed. Check that Mock SAP API is running.")
-                    render_technical_details(
-                        "Technical GRN API response",
-                        {"error": str(exc), "error_type": type(exc).__name__},
-                    )
-        except Exception as grn_exception:
-            st.error(f"Error in GRN creation form: {grn_exception}")
-
-    with tab_invoice:
-        try:
-            st.subheader("Manual Invoice Entry")
-            st.warning(
-                "Manual invoice entry bypasses PDF/OCR extraction. Use this only for internal validation testing. For a client demo, use Invoice Journey."
-            )
+            st.subheader("Create Manual Invoice")
 
             col1, col2 = st.columns(2)
             with col1:
@@ -3090,7 +2786,12 @@ def render_reference_data_test_setup():
                 vendor_name = st.text_input("Vendor Name", key="invoice_vendor_name_input")
             with col2:
                 invoice_date = st.date_input("Invoice Date", key="invoice_date_input")
-                currency = st.selectbox("Currency", options=["INR", "USD", "EUR", "GBP"], index=0, key="invoice_currency_input")
+                currency = st.selectbox(
+                    "Currency",
+                    options=CURRENCY_OPTIONS,
+                    index=0,
+                    key="invoice_currency_input",
+                )
                 payment_status = st.selectbox(
                     "Payment Status",
                     options=["Pending", "Paid", "Rejected", "Overdue"],
@@ -3126,92 +2827,222 @@ def render_reference_data_test_setup():
 
             if st.button("Create Invoice", key="create_invoice_button"):
                 try:
-                    validation_errors = []
-                    if not invoice_number.strip():
-                        validation_errors.append("Invoice Number is required.")
-                    if not po_number.strip():
-                        validation_errors.append("Related PO Number is required.")
-                    if not vendor_name.strip():
-                        validation_errors.append("Vendor Name is required.")
-                    valid_lines = [
-                        item for item in invoice_line_items
-                        if str(item.get("description", "")).strip()
-                        and float(item.get("line_amount", 0) or 0) > 0
-                    ]
-                    if not valid_lines:
-                        validation_errors.append("Add at least one invoice line item with a description and positive amount.")
-                    if validation_errors:
-                        for message in validation_errors:
-                            st.warning(message)
-                    else:
-                        payload = {
-                            "document_type": "invoice",
-                            "invoice_number": invoice_number,
-                            "po_number": po_number,
-                            "vendor_name": vendor_name,
-                            "invoice_date": str(invoice_date),
-                            "currency": currency,
-                            "document_subtotal": invoice_subtotal,
-                            "tax_amount": tax_amount,
-                            "vat_percent": vat_percent,
-                            "document_total": document_total,
-                            "amount": document_total,
-                            "payment_status": payment_status,
-                            "line_items": invoice_line_items,
-                            "last_modified": datetime.now().isoformat(),
-                        }
+                    payload = {
+                        "document_type": "invoice",
+                        "invoice_number": invoice_number,
+                        "po_number": po_number,
+                        "vendor_name": vendor_name,
+                        "invoice_date": str(invoice_date),
+                        "currency": currency,
+                        "document_subtotal": invoice_subtotal,
+                        "tax_amount": tax_amount,
+                        "vat_percent": vat_percent,
+                        "document_total": document_total,
+                        "amount": document_total,
+                        "payment_status": payment_status,
+                        "line_items": invoice_line_items,
+                        "last_modified": datetime.now().isoformat(),
+                    }
 
-                        result = save_manual_invoice_to_master(payload)
-                        st.success("Manual invoice saved to invoice_master.")
-                        render_technical_details("Technical invoice save details", result)
+                    if not invoice_number:
+                        st.error("Invoice Number is required.")
+                        st.stop()
 
-                        if result.get("ap_agent_trigger_error"):
-                            st.warning(
-                                "Invoice was saved, but AP Agent trigger failed. Make sure AP Agent is running on port 8000, then trigger processing."
-                            )
-                            st.code(result.get("ap_agent_trigger_error"), language="text")
-                        else:
-                            st.success("AP Agent trigger completed.")
-                except Exception as exc:
-                    st.error("Manual invoice save failed.")
-                    render_technical_details(
-                        "Technical invoice save details",
-                        {"error": str(exc), "error_type": type(exc).__name__},
+                    if not po_number:
+                        st.error("Related PO Number is required.")
+                        st.stop()
+
+                    if not vendor_name:
+                        st.error("Vendor Name is required.")
+                        st.stop()
+
+                    result = save_manual_invoice_to_master(
+                        payload
                     )
-        except Exception as invoice_exception:
-            st.error(f"Error in manual invoice form: {invoice_exception}")
 
-    with tab_tables:
-        st.subheader("Reference Tables")
-        table_tabs = st.tabs(
-            [
-                "Master Invoices",
-                "Master POs",
-                "Master GRNs",
-                "Posted Invoice References",
-            ]
-        )
-        with table_tabs[0]:
-            render_full_master_table("invoice_master", "No master invoices found.")
-        with table_tabs[1]:
-            render_full_master_table("sap_po_master", "No master PO records found.")
-        with table_tabs[2]:
-            render_full_master_table("sap_grn_master", "No master GRN records found.")
-        with table_tabs[3]:
-            render_full_master_table(
-                "sap_posted_invoice_master",
-                "No posted invoice references found.",
+                    st.success(
+                        "Manual invoice saved to invoice_master."
+                    )
+
+                    st.json(result)
+
+                    if result.get("ap_agent_trigger_error"):
+                        st.warning(
+                            "Invoice was saved, but AP Agent trigger failed. "
+                            "Make sure AP Agent is running on port 8000, then trigger processing."
+                        )
+                        st.code(
+                            result.get("ap_agent_trigger_error"),
+                            language="text",
+                        )
+                    else:
+                        st.success(
+                            "AP Agent trigger completed."
+                        )
+                except Exception as e:
+                    st.exception(e)
+        except Exception as invoice_exception:
+            st.error(f"Error in Invoice creation form: {invoice_exception}")
+
+    # ===================================
+    # CREATE PO
+    # ===================================
+    with tab2:
+        try:
+            st.subheader("Create Mock Purchase Order")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                po_number = st.text_input("PO Number", key="po_number_input")
+                po_vendor_name = st.text_input("Vendor Name", key="po_vendor_name_input")
+                po_date = st.date_input("PO Date", key="po_date_input")
+            with col2:
+                po_currency = st.selectbox(
+                    "Currency",
+                    options=CURRENCY_OPTIONS,
+                    index=0,
+                    key="po_currency_input",
+                )
+                vat_percent = st.number_input("VAT %", min_value=0.0, max_value=100.0, value=18.0, key="po_vat_percent_input")
+                po_status = st.selectbox("PO Status", options=["Open", "Closed", "Cancelled", "Partially Received"], key="po_status_input")
+
+            po_subtotal, po_line_items = render_line_items_editor(
+                state_key="po_line_items",
+                prefix="po",
+                title="PO Line Items",
+                qty_label="Quantity",
+                qty_min=1,
             )
 
-    # -----------------------------------
-    # ADMIN DATA MANAGER
-    # -----------------------------------
+            st.subheader("PO Totals")
+            tax_amount = po_subtotal * (vat_percent / 100)
+            po_document_total = po_subtotal + tax_amount
 
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Subtotal", f"{po_subtotal:.2f} {po_currency}")
+            with col2:
+                st.metric("Tax Amount", f"{tax_amount:.2f} {po_currency}")
+            with col3:
+                st.metric("Total", f"{po_document_total:.2f} {po_currency}")
 
-def render_admin_demo_cleanup():
-    render_section_help(
-        "Use this page to clean demo invoice data and reset the environment safely."
-    )
+            if st.button("Create Purchase Order", key="create_po_button"):
+                try:
+                    payload = {
+                        "document_type": "po",
+                        "po_number": po_number,
+                        "vendor_name": po_vendor_name,
+                        "po_date": str(po_date),
+                        "currency": po_currency,
+                        "document_subtotal": po_subtotal,
+                        "tax_amount": tax_amount,
+                        "vat_percent": vat_percent,
+                        "document_total": po_document_total,
+                        "amount": po_document_total,
+                        "po_status": po_status,
+                        "line_items": po_line_items,
+                        "last_modified": datetime.now().isoformat(),
+                    }
+
+                    response = requests.post(
+                        f"{API_BASE_URL}/sap/po",
+                        json=payload,
+                        auth=(SAP_USERNAME, SAP_PASSWORD),
+                        timeout=60,
+                    )
+
+                    if response.status_code == 200:
+                        st.success("Purchase Order created successfully.")
+                        st.json(response.json())
+                    else:
+                        st.error(f"Error creating PO: {response.text}")
+                except Exception as e:
+                    st.exception(e)
+        except Exception as po_exception:
+            st.error(f"Error in PO creation form: {po_exception}")
+
+    # ===================================
+    # CREATE GRN
+    # ===================================
+    with tab3:
+        try:
+            st.subheader("Create Mock GRN")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                gr_number = st.text_input("GRN Number", key="grn_number_input")
+                po_number = st.text_input("Related PO Number", key="grn_po_number_input")
+                vendor_name = st.text_input("Vendor Name", key="grn_vendor_name_input")
+            with col2:
+                gr_date = st.date_input("GRN Date", key="grn_date_input")
+                currency = st.selectbox(
+                    "Currency",
+                    options=CURRENCY_OPTIONS,
+                    index=0,
+                    key="grn_currency_input",
+                )
+                gr_status = st.selectbox(
+                    "GRN Status",
+                    options=["Received", "Partially Received", "Pending"],
+                    key="grn_status_input",
+                )
+
+            grn_subtotal, grn_line_items = render_line_items_editor(
+                state_key="grn_line_items",
+                prefix="grn",
+                title="GRN Line Items",
+                qty_label="Received Quantity",
+                qty_min=0,
+            )
+
+            st.subheader("GRN Total")
+            grn_document_total = grn_subtotal
+
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Document Subtotal", f"{grn_subtotal:.2f} {currency}")
+            with col2:
+                st.metric("Total Amount", f"{grn_document_total:.2f} {currency}")
+
+            if st.button("Create GRN", key="create_grn_button"):
+                try:
+                    payload = {
+                        "document_type": "grn",
+                        "gr_number": gr_number,
+                        "po_number": po_number,
+                        "vendor_name": vendor_name,
+                        "gr_date": str(gr_date),
+                        "currency": currency,
+                        "document_subtotal": grn_subtotal,
+                        "document_total": grn_document_total,
+                        "amount": grn_document_total,
+                        "gr_status": gr_status,
+                        "line_items": grn_line_items,
+                        "last_modified": datetime.now().isoformat(),
+                    }
+
+                    response = requests.post(
+                        f"{API_BASE_URL}/sap/gr",
+                        json=payload,
+                        auth=(SAP_USERNAME, SAP_PASSWORD),
+                        timeout=60,
+                    )
+
+                    if response.status_code == 200:
+                        st.success("GRN created successfully.")
+                        st.json(response.json())
+                    else:
+                        st.error(f"Error creating GRN: {response.text}")
+                except Exception as e:
+                    st.exception(e)
+        except Exception as grn_exception:
+            st.error(f"Error in GRN creation form: {grn_exception}")
+
+# -----------------------------------
+# ADMIN DATA MANAGER
+# -----------------------------------
+
+elif selected_module == "Admin Data Manager":
 
     st.header(
         "Admin Data Manager"
@@ -3223,158 +3054,29 @@ def render_admin_demo_cleanup():
 
     st.divider()
 
-    st.subheader("Recommended Demo Cleanup")
-    st.info(
-        "Use this before a client demo when you want to reuse PO/GRN reference data but clear prior invoice runs, AP Agent history, uploaded invoice files, validations, emails, posting attempts, and audit events."
-    )
-    confirm_invoice_cleanup = st.checkbox(
-        "I understand this will clear invoice run data but preserve PO and GRN reference data.",
-        key="confirm_invoice_demo_run_cleanup",
-    )
-    clear_posted_references = st.checkbox(
-        "Also clear posted invoice reference table",
-        value=False,
-        key="clear_posted_references_with_invoice_cleanup",
-    )
-    if st.button(
-        "Clean Invoice Demo Run Only",
-        key="clean_invoice_demo_run_only_btn",
-        disabled=not confirm_invoice_cleanup,
-    ):
-        cleanup_result = clean_invoice_demo_run_only(
-            clear_posted_references=clear_posted_references
-        )
-        if cleanup_result.get("status") == "blocked":
-            show_master_reset_blocked_message()
-        elif cleanup_result.get("status") == "failed":
-            st.error(cleanup_result.get("message", "Cleanup failed."))
-        else:
-            st.success(cleanup_result.get("message"))
-            summary_cards = [
-                {
-                    "title": "Invoice master",
-                    "value": (
-                        "Cleared"
-                        if cleanup_result.get("invoice_master_cleared")
-                        else "Not cleared"
-                    ),
-                    "help_text": "Prior invoice run rows",
-                },
-                {
-                    "title": "AP Agent DB",
-                    "value": (
-                        "Deleted"
-                        if cleanup_result.get("agent_db_deleted_paths")
-                        else "Not found"
-                    ),
-                    "help_text": "AP Agent invoice history",
-                },
-                {
-                    "title": "Uploaded files",
-                    "value": cleanup_result.get("uploaded_files_deleted_count", 0),
-                    "help_text": "Invoice upload artifacts removed",
-                },
-                {
-                    "title": "PO / GRN data",
-                    "value": "Preserved",
-                    "help_text": "Reference data kept for the next demo",
-                },
-                {
-                    "title": "Posted references",
-                    "value": (
-                        "Cleared"
-                        if cleanup_result.get("posted_references_cleared")
-                        else "Preserved"
-                    ),
-                    "help_text": "Duplicate/already-posted reference table",
-                },
-            ]
-            render_metric_cards(summary_cards, columns=3)
-        delete_errors = cleanup_result.get("agent_db_delete_errors", [])
-        if any(
-            item.get("error_type") == "PermissionError"
-            for item in delete_errors
-        ):
-            st.warning("Stop AP Agent API and run cleanup again.")
-        render_technical_details("Technical cleanup details", cleanup_result)
-
-    st.divider()
-
-    st.subheader("Mock API / Reference Data Readiness")
-    readiness_cards = [
-        {
-            "title": "Mock SAP API",
-            "value": api_health(API_BASE_URL),
-            "help_text": "Reference API used for PO and GRN setup",
-        },
-        {
-            "title": "Current PO count",
-            "value": safe_table_count("sap_po_master"),
-            "help_text": "PO records in master reference table",
-        },
-        {
-            "title": "Current GRN count",
-            "value": safe_table_count("sap_grn_master"),
-            "help_text": "GRN records in master reference table",
-        },
-    ]
-    render_metric_cards(readiness_cards, columns=3)
-    st.info(
-        "If Mock SAP API has no PO/GRN data, create PO and GRN records in Reference Data & Test Setup or run the seed script, then click Start Structured Sync."
-    )
-
-    st.divider()
-
     # ==========================
     # RESET DEMO
     # ==========================
 
     st.subheader(
-        "Full Master Reset"
-    )
-    st.warning(
-        "This clears invoice, PO, GRN, posted invoice reference tables and sync state. Use only when rebuilding all reference data."
+        "Reset Demo Environment"
     )
 
-    confirm_reset = st.checkbox(
-    "I understand this will clear invoice_master, PO, GRN, posted invoice tables, and reset sync state.",
-    key="confirm_reset_demo"
-        )
+    st.info(
+        "Use the first reset before a client demo. It clears invoice-flow data but keeps PO and GRN reference data. "
+        "Use Master Reset only when you want to wipe everything."
+    )
 
-    if confirm_reset:
+    reset_col1, reset_col2 = st.columns(2)
+    with reset_col1:
+        st.markdown("#### Reset invoice demo flow")
+        st.success("Keeps PO and GRN data intact.")
+        render_invoice_flow_reset_panel(location="admin")
 
-        if st.button(
-            "Full Master Reset",
-            key="reset_demo_btn"
-        ):
-
-            if not database_settings.allow_destructive_master_reset:
-                show_master_reset_blocked_message()
-            else:
-                try:
-
-                    result = reset_demo_environment()
-
-                    if result.get("status") == "success":
-
-                        st.success(
-                            "Demo environment reset."
-                        )
-
-                        st.rerun()
-
-                    else:
-
-                        st.error(
-                            result.get(
-                                "error",
-                                "Reset failed"
-                            )
-                        )
-
-                except Exception as e:
-
-                    st.exception(e)
+    with reset_col2:
+        st.markdown("#### Master reset")
+        st.error("Deletes invoice, posted invoice, PO and GRN data.")
+        render_master_reset_panel(location="admin")
 
     st.divider()
 
@@ -3593,7 +3295,7 @@ def render_admin_demo_cleanup():
     "invoice_master",
     "sap_po_master",
     "sap_grn_master"
-    ]
+]
     )
 
     if st.button(
@@ -3617,39 +3319,3 @@ def render_admin_demo_cleanup():
 
             except Exception as e:
                 st.exception(e)
-
-st.sidebar.header("AP Automation Demo")
-selected_module = st.sidebar.radio(
-    "Navigate",
-    [
-        "Dashboard / Control Tower",
-        "Invoice Journey",
-        "AP Agent Workbench",
-        "Response & Recheck Demo",
-        "Reference Data & Test Setup",
-        "Admin / Demo Cleanup",
-    ],
-)
-
-st.sidebar.divider()
-st.sidebar.caption("Service Status")
-with st.sidebar:
-    st.write("AP Agent")
-    render_status_badge(api_health(AP_AGENT_BASE_URL))
-    st.caption(AP_AGENT_BASE_URL)
-    st.write("Mock SAP API")
-    render_status_badge(api_health(API_BASE_URL))
-    st.caption(API_BASE_URL)
-
-if selected_module == "Dashboard / Control Tower":
-    render_dashboard_control_tower()
-elif selected_module == "Invoice Journey":
-    render_invoice_journey()
-elif selected_module == "AP Agent Workbench":
-    render_ap_agent_workbench()
-elif selected_module == "Response & Recheck Demo":
-    render_response_recheck_demo()
-elif selected_module == "Reference Data & Test Setup":
-    render_reference_data_test_setup()
-elif selected_module == "Admin / Demo Cleanup":
-    render_admin_demo_cleanup()
